@@ -10,8 +10,8 @@ Two deliverables live here, built in this order:
 | `rlmwatch/` | Reusable monitoring library — startup gate, in-pod watchdog, external sentinel, escalation ladder. Built and fault-tested *before* it is wired to anything. |
 | `experiments/v0_smoke/` | The V0 smoke test: provision 2x A40, run 20 steps of RLM context-management RL, measure seconds/step, upload the adapter, terminate. |
 
-Specs: [`_instructions.md`](_instructions.md) (the experiment) and
-[`_monitoring_instructions.md`](_monitoring_instructions.md) (the monitor).
+Specs live locally as `_instructions.md` (the experiment) and
+`_monitoring_instructions.md` (the monitor); they are gitignored.
 Both are normative — code follows them, not the other way round.
 
 ## The one-paragraph version

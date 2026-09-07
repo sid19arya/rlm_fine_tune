@@ -28,3 +28,6 @@ snapshots/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local spec / scratch files
+_*
