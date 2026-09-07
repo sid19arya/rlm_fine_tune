@@ -196,26 +196,11 @@ class EscalationLadder:
 
     # --- execution -----------------------------------------------------------
 
-    def handle(
-        self,
-        verdict: Verdict,
-        *,
-        recheck: Callable[[], Verdict] | None = None,
-        spend_usd: float | None = None,
-        projected_usd: float | None = None,
-    ) -> ActionRecord:
-        """Act on one verdict. Idempotent per level: never repeats a level it
-        has already reached for this probe within the same incident."""
-        state = self._state.setdefault(verdict.probe, _ProbeState())
+    def _decide(self, verdict: Verdict) -> tuple[Verdict, Level]:
+        """Resolve status and target level, without acting or waiting."""
         effective = self.resolve_status(verdict)
-
         if effective in ("ok", "unknown"):
-            state.consecutive_fails = 0
-            state.highest_level = Level.LOG
-            record = ActionRecord(verdict, Level.LOG, confirmed=False, steps=["log"])
-            self._log(verdict)
-            self.history.append(record)
-            return record
+            return verdict, Level.LOG
 
         promoted = verdict
         if effective != verdict.status:
@@ -230,22 +215,28 @@ class EscalationLadder:
                 evidence={**verdict.evidence, "promoted_from": verdict.status},
                 at=verdict.at,
             )
+        return promoted, self.target_level(promoted)
 
-        target = self.target_level(promoted)
-        confirmed = False
+    @staticmethod
+    def _downgrade_unconfirmed(verdict: Verdict) -> Verdict:
+        return Verdict(
+            probe=verdict.probe,
+            status="warn",
+            detail=f"{verdict.detail} -- did not reproduce on re-poll, not escalating",
+            evidence={**verdict.evidence, "confirmed": False},
+            at=verdict.at,
+        )
 
-        # Rule 1: nothing past L1 happens on a single unconfirmed reading.
-        if target > Level.NOTIFY:
-            confirmed = self._confirm(promoted, recheck)
-            if not confirmed:
-                target = Level.NOTIFY
-                promoted = Verdict(
-                    probe=promoted.probe,
-                    status="warn",
-                    detail=f"{promoted.detail} -- did not reproduce on re-poll, not escalating",
-                    evidence={**promoted.evidence, "confirmed": False},
-                    at=promoted.at,
-                )
+    def _finish(self, promoted: Verdict, target: Level, confirmed: bool, *,
+                spend_usd: float | None, projected_usd: float | None) -> ActionRecord:
+        state = self._state.setdefault(promoted.probe, _ProbeState())
+        if target == Level.LOG:
+            state.consecutive_fails = 0
+            state.highest_level = Level.LOG
+            record = ActionRecord(promoted, Level.LOG, confirmed=False, steps=["log"])
+            self._log(promoted)
+            self.history.append(record)
+            return record
 
         if promoted.status == "fail":
             state.consecutive_fails += 1
@@ -256,7 +247,79 @@ class EscalationLadder:
         self.history.append(record)
         return record
 
-    def _confirm(self, verdict: Verdict, recheck: Callable[[], Verdict] | None) -> bool:
+    def handle(
+        self,
+        verdict: Verdict,
+        *,
+        recheck: Callable[[], Verdict] | None = None,
+        spend_usd: float | None = None,
+        projected_usd: float | None = None,
+    ) -> ActionRecord:
+        """Act on one verdict, paying the confirmation delay if it escalates.
+
+        For a whole sweep prefer `handle_batch`, which pays that delay once
+        rather than once per failing probe.
+        """
+        promoted, target = self._decide(verdict)
+        confirmed = False
+
+        # Rule 1: nothing past L1 happens on a single unconfirmed reading.
+        if target > Level.NOTIFY:
+            confirmed = self._confirm(recheck)
+            if not confirmed:
+                target = Level.NOTIFY
+                promoted = self._downgrade_unconfirmed(promoted)
+
+        return self._finish(promoted, target, confirmed,
+                            spend_usd=spend_usd, projected_usd=projected_usd)
+
+    def handle_batch(
+        self,
+        verdicts: list[Verdict],
+        *,
+        recheck: Callable[[Verdict], Verdict] | None = None,
+        spend_usd: float | None = None,
+        projected_usd: float | None = None,
+    ) -> list[ActionRecord]:
+        """Act on a whole sweep, paying `confirm_delay_s` **once**.
+
+        Confirming serially would make the time-to-action scale with the number
+        of failing probes, and probes fail in clusters: a dead trainer trips
+        progress age, run state and observer agreement at once. At a 120s delay
+        that is six minutes to react to a pod that is already burning money for
+        nothing, and it is why the kill-9 acceptance case has a three-minute
+        budget. The whole sweep is re-polled together after a single wait.
+        """
+        decided = [self._decide(v) for v in verdicts]
+        needs_confirmation = [
+            (i, promoted) for i, (promoted, target) in enumerate(decided)
+            if target > Level.NOTIFY
+        ]
+
+        confirmations: dict[int, bool] = {}
+        if needs_confirmation and recheck is not None:
+            self._sleep(self.cfg.failsafe.confirm_delay_s)
+            for index, promoted in needs_confirmation:
+                try:
+                    confirmations[index] = recheck(promoted).status == "fail"
+                except Exception as exc:  # noqa: BLE001 - a failed re-poll is not confirmation
+                    log.warning("confirmation re-poll for %s failed: %s",
+                                promoted.probe, exc)
+                    confirmations[index] = False
+
+        records: list[ActionRecord] = []
+        for index, (promoted, target) in enumerate(decided):
+            confirmed = confirmations.get(index, False)
+            if target > Level.NOTIFY and not confirmed:
+                target = Level.NOTIFY
+                promoted = self._downgrade_unconfirmed(promoted)
+            records.append(
+                self._finish(promoted, target, confirmed,
+                             spend_usd=spend_usd, projected_usd=projected_usd)
+            )
+        return records
+
+    def _confirm(self, recheck: Callable[[], Verdict] | None) -> bool:
         """Re-poll after `confirm_delay_s`. No recheck available means unconfirmed.
 
         Refusing to escalate without a second opinion is what keeps a network
@@ -268,7 +331,7 @@ class EscalationLadder:
         try:
             second = recheck()
         except Exception as exc:  # noqa: BLE001 - a failed re-poll is not confirmation
-            log.warning("confirmation re-poll for %s failed: %s", verdict.probe, exc)
+            log.warning("confirmation re-poll failed: %s", exc)
             return False
         return second.status == "fail"
 
