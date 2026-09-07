@@ -262,9 +262,20 @@ class Notify:
     heartbeat_url: str = ""
     webhook: str = ""
     console: bool = True
+    # Nous Hermes Agent inbound webhook: http://<host>:8644/webhooks/<route>.
+    # The secret comes from the environment, never the file -- a signing key in
+    # a committed config is a key that is no longer secret.
+    hermes_webhook: str = ""
+    hermes_secret: str = ""
 
     def validate(self) -> None:
-        for name in ("slack_webhook", "heartbeat_url", "webhook"):
+        if self.hermes_webhook and not self.hermes_secret:
+            raise ConfigError(
+                "notify.hermes_webhook is set but notify.hermes_secret is empty. "
+                "The Hermes gateway rejects unsigned webhooks, so this would fail "
+                "silently at the first alert. Export HERMES_WEBHOOK_SECRET."
+            )
+        for name in ("slack_webhook", "heartbeat_url", "webhook", "hermes_webhook"):
             url = getattr(self, name)
             if url and not url.startswith(("http://", "https://")):
                 raise ConfigError(f"notify.{name} must be an http(s) URL, got {url!r}")
