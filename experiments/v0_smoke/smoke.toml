@@ -1,0 +1,66 @@
+## V0 smoke test -- Qwen3-8B, 2x A40, 20 steps, 32 rollouts/step.
+##
+## Derived from training/configs/rlm-qwen3-30b-example.toml. Three settings here
+## exist specifically to handle the failures that example config invites on
+## Ampere hardware; each is marked WILL BITE and none of them is optional.
+##
+## Nothing in this file is a tuning knob for V0. If a run is failing, the answer
+## is not to change max_steps, batch_size, or the model -- it is to find out why
+## it is failing. Changing a value to "make it work" invalidates the one number
+## this run exists to produce.
+
+inference_gpu_ids = [0]
+trainer_gpu_ids   = [1]
+
+# 20 steps is the whole run. It cannot answer the research question: at 32
+# rollouts/step with roughly binary reward at p~0.24, the standard error per
+# step is 0.43/sqrt(32) ~ +/-7.6 points, so a real 5-point gain is invisible.
+# The deliverable is seconds per step, not the reward curve.
+max_steps = 20
+
+[model]
+name = "Qwen/Qwen3-8B"
+
+[trainer.model]
+# WILL BITE #1. flash_attention_3 is Hopper-only and will not build on Ampere.
+# The example config assumes A100/H100; the A40 is Ampere. This is the most
+# likely first crash, and it happens during model init rather than at step 1,
+# so it presents as "the run never started" rather than as a config error.
+attn = "flash_attention_2"
+impl = "auto"
+
+[trainer.model.experimental.lora]
+rank = 32
+alpha = 64
+dropout = 0.0
+target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+[orchestrator]
+batch_size = 8
+rollouts_per_example = 4        # 8 x 4 = 32 rollouts/step, 640 for the run
+
+[orchestrator.train.sampling]
+max_completion_tokens = 2048
+
+[orchestrator.train.sampling.extra_body]
+# WILL BITE #2. Qwen3-8B is hybrid-thinking. Left enabled, trajectories spend
+# their whole token budget on reasoning traces before ever reaching the REPL.
+# The run looks completely alive and produces nothing usable.
+enable_thinking = false
+
+## WILL BITE #3 is not in this file. Sub-LM calls must be stripped from BOTH the
+## REPL globals and the system prompt in training/src/rlm_train/ -- see
+## strip_sub_lm_calls.py. Removing them from only one is worse than removing
+## them from neither: a leftover prompt mention means the model keeps calling
+## llm_query, every rollout dies on NameError, and the run looks healthy from
+## outside while scoring zeros.
+
+[logging.wandb]
+project = "rlm-context-management"
+name = "v0-smoke"
+
+## VRAM budget, for reference when reading nvidia-smi:
+##   inference GPU: ~16GB weights + ~28GB KV  => ~11 concurrent 16k sequences
+##   trainer GPU:   ~16GB frozen + 0.4GB adapter + activations
+## Both fit in 48GB with room to spare. If they do not, something else is
+## resident and the startup gate should have caught it.

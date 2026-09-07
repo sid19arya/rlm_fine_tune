@@ -1,0 +1,105 @@
+# rlmwatch config for the V0 smoke test.
+#
+# Credentials are never in this file -- they come from the environment, so this
+# can be committed. ${VAR} is interpolated at load; ${VAR:-default} supplies a
+# fallback. A missing variable with no default is a load error rather than an
+# empty string, because silently monitoring pod "" is worse than refusing to
+# start.
+
+run:
+  name: rlm-v0-smoke
+  regime: rl
+  wandb: ${WANDB_PATH:-you/rlm-context-management/v0-smoke}
+  pod_id: ${RUNPOD_POD_ID}
+
+expect:
+  gpu_type: "NVIDIA A40"
+  gpu_count: 2
+  # 48GB cards. Inference needs ~16GB weights + ~28GB KV; the trainer needs
+  # ~16GB frozen + 0.4GB adapter + activations. Requiring 40GB free means the
+  # gate fails now if something else is already resident, rather than OOMing
+  # an hour in.
+  min_free_vram_gb: 40
+  # Qwen3-8B is ~16GB and HF_HOME is on the volume disk. 60GB leaves room for
+  # the model, the adapter checkpoints and the trajectory logs.
+  min_disk_gb: 60
+  checkpoint_dir: /workspace/outputs
+
+startup:
+  deadline_s: 1800    # setup includes a 16GB model download
+  # Terminate, not stop: a gate failure happens before the first step, so there
+  # is nothing on the disk worth the storage bill.
+  on_failure: terminate
+
+stall_threshold:
+  default: 300
+  # A GRPO rollout at 32 rollouts x 2048 tokens takes minutes. `auto` resolves
+  # to 4x the baseline the startup gate measures, floored at 600s -- a measured
+  # threshold rather than a guessed one.
+  rollout: auto
+  eval: auto
+  checkpoint: 900
+
+health:
+  # Base Qwen3-8B scores ~24 on OOLONG in this harness, so per-group reward
+  # variance should be substantial. Anything near zero means the advantage is
+  # zero and training is a no-op.
+  reward_std_min: 0.01
+  reward_std_patience: 20
+  kl_max: 0.15
+  entropy_min: 0.3
+  # Every rollout must produce a parseable ```repl block. A sharp drop here is
+  # the signature of a leftover llm_query reference killing rollouts on
+  # NameError while the run looks healthy from outside.
+  format_success_min: 0.9
+  completion_len: [64, 2048]     # matches max_completion_tokens in smoke.toml
+  throughput_degradation_pct: 30
+
+  # rlm/prime-rl metric names, mapped here rather than patched into the
+  # trainer. Verify these against the first few logged steps and correct them
+  # before a long run -- a mis-mapped key makes its probe report `unknown`
+  # forever, which the ladder surfaces as a warning rather than silently
+  # passing.
+  metric_aliases: {}
+
+budget:
+  # MEASURE this from the provisioned pod, do not guess. provision.py prints
+  # the figure. 2x A40 at $0.44 = $0.88/hr; A6000 fallback is $0.98/hr.
+  hourly_rate_usd: 0.88
+  # The V0 budget is "under $5". The cap is unconditional and enforced by the
+  # sentinel, so it survives the pod becoming unresponsive.
+  max_usd: 5.0
+  warn_pct: 75
+  # ~3h including setup. A smoke test that has run for four hours has failed at
+  # something, whatever the metrics say.
+  max_wall_clock_h: 4.0
+  storage_gb: 100
+
+failsafe:
+  confirm_delay_s: 120
+  unknown_tolerance_s: 900
+  dead_mans_timeout_s: 1800
+  checkpoint_timeout_s: 600
+
+  # `stop`, not `terminate`, and this is deliberate for V0.
+  #
+  # There is no network volume by design -- it pins the datacenter and bills
+  # monthly -- so terminate would delete /workspace and the adapter with it.
+  # `stop` pauses compute (the expensive part) and keeps the disk, at
+  # $0.07/GB/month, so a failed run can still be diagnosed and its adapter
+  # recovered. finish.py terminates explicitly once the artifacts are verified
+  # on HF.
+  #
+  # For V1, once /workspace is on a network volume, flip this to terminate and
+  # set checkpoint_dir_is_network_volume: true.
+  on_terminal: stop
+  checkpoint_dir_is_network_volume: false
+
+notify:
+  slack_webhook: ${SLACK_WEBHOOK:-}
+  heartbeat_url: ${HEALTHCHECKS_URL:-}
+  console: true
+
+# 60s from outside the pod. The sentinel has to cost under $1/day including
+# API calls, and nothing it watches changes meaningfully faster than this.
+poll_interval_s: 60
