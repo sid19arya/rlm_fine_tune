@@ -136,11 +136,28 @@ def cmd_digest(args: argparse.Namespace) -> int:
     """
     from rlmwatch.clients.runpod import RunPodClient
     from rlmwatch.clients.wandb import WandbClient
+    from rlmwatch.config import from_dict
     from rlmwatch.digest import build_digest
     from rlmwatch.notify import HermesSink
     from rlmwatch.probes.base import Context
 
-    cfg = load_config(args.config)
+    if args.config:
+        cfg = load_config(args.config)
+    elif args.run:
+        # Standalone mode, for an observer that pip-installed rlmwatch and has
+        # no checkout: `configs/` is not part of the wheel. Everything the
+        # digest needs is the run path and the rate, so it is accepted directly
+        # rather than forcing a config file to be copied around and drift.
+        cfg = from_dict({
+            "run": {"name": args.run.split("/")[-1], "wandb": args.run},
+            "budget": {"hourly_rate_usd": args.rate, "max_usd": args.max_usd},
+            "failsafe": {"on_terminal": "stop"},
+            "notify": {"console": False},
+        })
+    else:
+        print("digest needs either -c/--config or --run entity/project/run-id",
+              file=sys.stderr)
+        return EXIT_CONFIG
     runpod = None
     if cfg.run.pod_id and os.environ.get("RUNPOD_API_KEY"):
         runpod = RunPodClient(os.environ["RUNPOD_API_KEY"])
@@ -270,8 +287,19 @@ def build_parser() -> argparse.ArgumentParser:
                        help="cap the ladder at L1: alert, never kill")
     watch.set_defaults(func=cmd_watch)
 
-    digest = add_config(subparsers.add_parser(
-        "digest", help="report training dynamics (what moved), optionally to Hermes"))
+    # Not add_config(): the digest is the one command an external observer
+    # runs with no checkout, so --run replaces the config file entirely.
+    digest = subparsers.add_parser(
+        "digest", help="report training dynamics (what moved), optionally to Hermes")
+    digest.add_argument("-c", "--config", default=None,
+                        help="run YAML; omit it and pass --run instead")
+    digest.add_argument("--run", default=None,
+                        help="W&B run path entity/project/run-id, for use without a "
+                             "config file")
+    digest.add_argument("--rate", type=float, default=0.0,
+                        help="pod cost per hour, used for the spend line")
+    digest.add_argument("--max-usd", type=float, default=5.0,
+                        help="budget cap, reported alongside spend")
     digest.add_argument("--send", action="store_true",
                         help="POST the digest to the configured Hermes webhook")
     digest.add_argument("--rollouts-per-step", type=int, default=None,

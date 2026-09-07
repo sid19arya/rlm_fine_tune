@@ -290,3 +290,12 @@ class TestHermesBriefing:
 
     def test_it_names_the_highest_value_failure(self):
         assert "reward/std" in self.text and "advantage is zero" in self.text
+
+    def test_the_briefing_installs_the_wandb_extra(self):
+        """Plain `pip install` gives a monitor that cannot read anything."""
+        assert "rlmwatch[wandb]" in self.text
+
+    def test_the_briefing_uses_the_standalone_invocation(self):
+        """configs/ is not in the wheel, so -c would fail after a pip install."""
+        assert "--run rlm-runpod-1/rlm-context-management/v0-smoke" in self.text
+        assert "-c configs/" not in self.text

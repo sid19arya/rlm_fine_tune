@@ -42,14 +42,27 @@ Poll W&B every 15-30 minutes. Two ways, in order of preference:
 so you do not have to re-derive any of it:
 
 ```bash
-pip install git+https://github.com/sid19arya/rlm_fine_tune
+# The [wandb] extra is required. Without it the tool installs but cannot read
+# anything, and every poll reports that the monitor is blind.
+pip install "rlmwatch[wandb] @ git+https://github.com/sid19arya/rlm_fine_tune"
+
 export WANDB_API_KEY=<key>
-rlmwatch digest -c configs/rlm-ft-v0-smoke.yaml --json \
-  --rollouts-per-step 32 --billing-lead-min 30
+
+rlmwatch digest \
+  --run rlm-runpod-1/rlm-context-management/v0-smoke \
+  --rate 0.88 --max-usd 5 \
+  --rollouts-per-step 32 --billing-lead-min 30 --json
 ```
+
+No config file or repository checkout is needed; `--run` carries everything.
 
 It prints a human-readable summary and, with `--json`, a structured version with
 `too_early` / `on_track` / `overdue` flags per signal. Relay the summary.
+
+**Before the run exists** the tool reports `cannot read the run ... (not found)`.
+That is expected until training actually starts — provisioning, setup and a 16GB
+model download take roughly 30-40 minutes. Do not report it as a failure; say
+the run has not started yet. If it persists well beyond that, say so once.
 
 **Fallback — read W&B directly** with the public API
 (`wandb.Api().run("rlm-runpod-1/rlm-context-management/v0-smoke")`), and apply §3 and §4
