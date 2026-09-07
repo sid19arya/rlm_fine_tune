@@ -336,12 +336,19 @@ class EscalationLadder:
             log.error("checkpoint request failed: %s", exc)
             return False
 
-    def _terminate(self, verdict: Verdict) -> None:
+    def _terminate(self, verdict: Verdict, action: str | None = None) -> None:
         """L4, in the order the spec mandates: alert, flush, then kill.
 
         `wandb.finish()` before termination is what makes the metrics survive.
         Terminating first leaves the last minutes of the run -- the interesting
         ones -- unflushed and gone.
+
+        `action` overrides `failsafe.on_terminal` for this call only. The
+        startup gate uses it: `startup.on_failure` is a separate setting because
+        a gate failure happens before the first step, so there are no
+        checkpoints to lose and terminate is unambiguously the right answer even
+        when the steady-state policy is `stop`. Passing it explicitly is what
+        keeps that decision out of the shared config object.
         """
         if self.wandb_module is not None:
             try:
@@ -357,6 +364,7 @@ class EscalationLadder:
             except Exception as exc:  # noqa: BLE001
                 log.warning("wandb.finish failed: %s", exc)
 
+        action = action or self.cfg.failsafe.on_terminal
         pod_id = self.cfg.run.pod_id
         if not self.runpod or not pod_id:
             log.error(
@@ -365,7 +373,7 @@ class EscalationLadder:
             )
             return
         try:
-            if self.cfg.failsafe.on_terminal == "terminate":
+            if action == "terminate":
                 self.runpod.terminate(pod_id)
             else:
                 self.runpod.stop(pod_id)
@@ -373,12 +381,12 @@ class EscalationLadder:
         except Exception as exc:  # noqa: BLE001
             log.critical(
                 "FAILED TO %s POD %s: %s -- the pod is still billing, stop it by hand",
-                self.cfg.failsafe.on_terminal.upper(), pod_id, exc,
+                action.upper(), pod_id, exc,
             )
 
     # --- guards --------------------------------------------------------------
 
-    def shutdown(self, reason: str) -> None:
+    def shutdown(self, reason: str, *, action: str | None = None) -> None:
         """The mandatory exit guard. Wrap training so no exit path leaves a
         billing pod.
 
@@ -389,17 +397,18 @@ class EscalationLadder:
 
         Order: request checkpoint -> wandb.alert -> wandb.finish -> terminate.
         """
+        action = action or self.cfg.failsafe.on_terminal
         verdict = Verdict(
             probe="failsafe.shutdown",
             status="fail" if "crash" in reason.lower() else "ok",
             detail=f"shutting down: {reason}",
-            evidence={"reason": reason, "action": self.cfg.failsafe.on_terminal},
+            evidence={"reason": reason, "action": action},
         )
-        log.warning("shutdown(%s)", reason)
+        log.warning("shutdown(%s) -> %s", reason, action)
         if self.trainer is not None:
             self._checkpoint_and_halt()
         self.notifier.notify(verdict, Level.TERMINATE.label)
-        self._terminate(verdict)
+        self._terminate(verdict, action)
 
 
 def install_signal_handlers(ladder: EscalationLadder, *, signal_module=None) -> None:
