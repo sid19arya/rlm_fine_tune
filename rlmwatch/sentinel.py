@@ -209,6 +209,7 @@ class Sentinel:
             self.history.append(result)
             return result
 
+        by_name = {p.name: p for p in self.probes}
         for probe in self.probes:
             try:
                 verdict = probe.check(self._ctx)
@@ -219,15 +220,20 @@ class Sentinel:
                     evidence={"error": str(exc)},
                 )
             result.verdicts.append(verdict)
-            if verdict.status != "unknown":
-                contacted = True
 
-            def recheck(p=probe):
-                self._ctx.wandb.invalidate(self.cfg.run.wandb)
-                return p.check(self._ctx)
+        def recheck(verdict: Verdict) -> Verdict:
+            self._ctx.wandb.invalidate(self.cfg.run.wandb)
+            probe = by_name.get(verdict.probe)
+            if probe is None:  # a promoted verdict with no probe cannot confirm
+                return Verdict(probe=verdict.probe, status="unknown",
+                               detail="no probe to re-poll")
+            return probe.check(self._ctx)
 
-            self.ladder.handle(verdict, recheck=recheck, spend_usd=spend,
-                               projected_usd=projected)
+        # One confirmation wait for the whole sweep, not one per failing probe:
+        # probes fail in clusters, and serial confirmation would make the
+        # time-to-action scale with how badly the run is broken.
+        self.ladder.handle_batch(result.verdicts, recheck=recheck, spend_usd=spend,
+                                 projected_usd=projected)
 
         if contacted:
             self.last_contact = self._now()
