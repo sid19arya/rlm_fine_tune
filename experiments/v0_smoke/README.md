@@ -43,8 +43,8 @@ points** — they are not checkpoints to note and move past.
 | 1 | Spend cap, tooling, auth | `runpodctl gpu list` returns prices |
 | 2 | `provision.py --spend-cap-confirmed` | `nvidia-smi` shows 2 GPUs @ 48GB |
 | 3 | `setup.sh` on the pod | `huggingface-cli download` completes |
-| 4 | `smoke.toml` in place | all three "will bite" items handled |
-| 5 | `strip_sub_lm_calls.py --apply` | `--verify` reports no live references |
+| 4 | `setup.sh` copies `smoke.toml` in | all three "will bite" items handled |
+| 5 | `verify_ablation.py` | prompt and REPL agree; no sub-LM tools bound |
 | 6 | `rlmwatch preflight` then launch under tmux | panes for trainer, orchestrator, inference |
 | 7 | **GATE: `checks.py` at T+2 / 5 / 15 / 30 min** | all four pass |
 | 8 | 20 steps; record seconds/step | number written down |
@@ -82,9 +82,8 @@ actually terminate it.
 
 ## The three things that will bite
 
-These are in `smoke.toml` and `strip_sub_lm_calls.py` already. They are listed
-here because each one has a characteristic failure that looks like something
-else:
+All three are handled in `smoke.toml` already. They are listed here because
+each has a characteristic failure that looks like something else:
 
 1. **`flash_attention_3` will not build on Ampere.** The example config assumes
    A100/H100. A40 is Ampere. This is the most likely first crash, and it happens
@@ -94,11 +93,21 @@ else:
    budget on reasoning traces before ever touching the REPL. The run looks alive
    and produces nothing. Disabled via `extra_body: {"enable_thinking": false}`.
 
-3. **Sub-LM calls must go from the REPL globals *and* the system prompt.**
-   Removing them from only one is worse than removing them from neither: a
-   leftover prompt mention means the model keeps calling `llm_query`, every
-   rollout dies on `NameError`, and from outside the run looks perfectly
-   healthy while scoring zeros. `strip_sub_lm_calls.py --verify` checks both.
+3. **Sub-LM delegation is removed by a config flag, not a source edit.**
+   `enable_sub_lm = false` in `smoke.toml`, honoured by the pinned fork
+   (`sid19arya/rlm`, branch `context-mgmt`).
+
+   Sub-LM availability lives in **four** places in rlm: the REPL globals (bound
+   twice — once at setup, and again by `_restore_scaffold` after *every turn*),
+   the system prompt, the orchestrator addendum, and the OOLONG rubric's
+   `min_subcall` gate. Any disagreement between them fails silently: the model
+   keeps calling `llm_query`, every rollout dies on `NameError`, and from
+   outside the run looks perfectly healthy while scoring zeros. The fork drives
+   all four from the one flag, so that state is unrepresentable.
+
+   `verify_ablation.py` confirms the flag is actually *wired* — it builds a real
+   `Worker`, renders the real prompt, and checks they agree, including after
+   `_restore_scaffold()`. Run it before launching.
 
 ---
 

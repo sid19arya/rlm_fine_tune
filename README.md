@@ -10,6 +10,14 @@ keeps an unattended run from quietly burning the budget.
 | `configs/` | One validated YAML per run. No monitoring logic in the training script. |
 | `tests/chaos/` | The nine injected faults the library has to survive before it is trusted. |
 
+The experiment harness itself is **not** reimplemented here. It comes from
+[`sid19arya/rlm`](https://github.com/sid19arya/rlm) (branch `context-mgmt`, a
+fork of [`alexzhang13/rlm`](https://github.com/alexzhang13/rlm)) pinned to an
+exact SHA in `setup.sh`. The fork's one change is an `enable_sub_lm` flag that
+selects the no-recursion arm from a single place, so both arms run from the
+same commit and the experimental condition is recorded in the run's config
+rather than in the state of a working tree.
+
 Specs live locally as `_instructions.md` (the experiment) and
 `_monitoring_instructions.md` (the monitor); they are gitignored.
 Both are normative — code follows them, not the other way round.
@@ -56,7 +64,7 @@ export RUNPOD_POD_ID=<printed pod id>
 
 # on the pod
 bash setup.sh
-python strip_sub_lm_calls.py --apply && python strip_sub_lm_calls.py --verify
+python verify_ablation.py           # confirm the no-recursion arm is wired
 rlmwatch preflight -c configs/rlm-ft-v0-smoke.yaml
 tmux new -s rlm && uv run rl @ training/configs/smoke.toml
 

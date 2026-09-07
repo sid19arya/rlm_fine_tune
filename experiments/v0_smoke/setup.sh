@@ -52,9 +52,17 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 uv --version
 
-log "cloning and installing rlm"
-[ -d /workspace/rlm ] || git clone https://github.com/alexzhang13/rlm /workspace/rlm
+log "cloning and installing the rlm fork, pinned"
+# Our fork, not upstream. It carries the enable_sub_lm flag that selects the
+# no-recursion arm. Pinned to an exact commit so the harness version is part
+# of the run's record: a seconds-per-step number is only comparable against
+# the code that produced it.
+RLM_REPO="${RLM_REPO:-https://github.com/sid19arya/rlm}"
+RLM_SHA="${RLM_SHA:-edfe8548f53c265cdc40ac8cf2784137d2707c28}"
+[ -d /workspace/rlm ] || git clone "$RLM_REPO" /workspace/rlm
 cd /workspace/rlm
+git fetch -q origin && git checkout -q "$RLM_SHA"
+echo "  rlm pinned at $(git rev-parse --short HEAD)"
 uv venv --python 3.12
 # shellcheck disable=SC1091
 source .venv/bin/activate
@@ -72,9 +80,23 @@ idempotent and will skip everything already done.
 NOTE
 
 log "installing the monitor and its extras"
-uv pip install -e /workspace/rlm_fine_tune 2>/dev/null \
-  || echo "  (rlmwatch not present on the pod; copy the repo over or pip install it)"
+# This repo has to be ON the pod, not just referenced. Cloning is the
+# reproducible option; if you are iterating on rlmwatch locally, rsync your
+# working copy to /workspace/rlm_fine_tune before running this and the clone
+# is skipped.
+WATCH_REPO="${WATCH_REPO:-https://github.com/sid19arya/rlm_fine_tune}"
+[ -d /workspace/rlm_fine_tune ] || git clone "$WATCH_REPO" /workspace/rlm_fine_tune
+uv pip install -e /workspace/rlm_fine_tune
 uv pip install "wandb>=0.17" py-spy
+
+log "installing the smoke config into the rlm checkout"
+# rlm reads its own config directory, so the overlay config is copied in rather
+# than referenced. Copied on every run so an edit in this repo cannot be
+# silently shadowed by a stale copy from a previous setup.
+mkdir -p /workspace/rlm/training/configs
+cp /workspace/rlm_fine_tune/experiments/v0_smoke/smoke.toml \
+   /workspace/rlm/training/configs/smoke.toml
+echo "  training/configs/smoke.toml written"
 
 log "pre-downloading Qwen3-8B"
 # Not during step 1. A 16GB pull racing the first training step produces a
@@ -85,10 +107,12 @@ log "setup complete"
 cat <<'NEXT'
 Next:
 
-  1. Put smoke.toml at training/configs/smoke.toml
-  2. python strip_sub_lm_calls.py --apply   (then --verify)
-  3. rlmwatch preflight -c configs/rlm-ft-v0-smoke.yaml
-  4. tmux new -s rlm          <-- NEVER a bare SSH shell. A dropped
+  1. Confirm the ablation arm is actually selected:
+       python /workspace/rlm_fine_tune/experiments/v0_smoke/verify_ablation.py
+     (smoke.toml sets enable_sub_lm = false; this checks the REPL and the
+      prompt agree, and that nothing re-binds the tools mid-rollout)
+  2. rlmwatch preflight -c configs/rlm-ft-v0-smoke.yaml
+  3. tmux new -s rlm          <-- NEVER a bare SSH shell. A dropped
                                   connection kills an unwrapped run, and the
                                   pod keeps billing afterwards.
   5. uv run rl @ training/configs/smoke.toml

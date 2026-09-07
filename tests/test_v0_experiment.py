@@ -4,9 +4,12 @@ These scripts run once, on a live pod, with money already burning. That is the
 worst possible place to discover a bug in them, so the logic that decides
 "is this safe to launch" and "is this safe to terminate" is tested here.
 
-The one under real scrutiny is `strip_sub_lm_calls`. Getting it wrong does not
-crash the run -- it produces a clean-looking null result from a run that was
-silently answering a different question.
+The experimental condition itself is no longer enforced from this repo: it is
+`enable_sub_lm` in the pinned rlm fork, which drives the REPL globals, the
+prompt and the rubric gate from one flag. What is tested here is that
+`verify_ablation.py` correctly refuses a checkout where that flag is absent or
+not wired -- which is the case that would otherwise spend $5 measuring the
+wrong experiment.
 """
 
 from __future__ import annotations
@@ -14,8 +17,6 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-
-import pytest
 
 EXPERIMENT_DIR = Path(__file__).resolve().parent.parent / "experiments" / "v0_smoke"
 
@@ -28,140 +29,9 @@ def _load(name: str):
     return module
 
 
-strip = _load("strip_sub_lm_calls")
+verify_ablation = _load("verify_ablation")
 interventions = _load("interventions")
 provision = _load("provision")
-
-
-@pytest.fixture
-def tree(tmp_path):
-    """A miniature rlm_train tree with a globals binding and a prompt mention."""
-    root = tmp_path / "rlm_train"
-    root.mkdir()
-    (root / "repl.py").write_text(
-        "from rlm.sub import llm_query\n"
-        "\n"
-        "\n"
-        "def build_globals(context):\n"
-        "    env = {}\n"
-        '    env["context"] = context\n'
-        '    env["llm_query"] = llm_query\n'
-        "    return env\n",
-        encoding="utf-8",
-    )
-    (root / "prompts.py").write_text(
-        'SYSTEM_PROMPT = """You have a Python REPL.\n'
-        "`context` holds the document. You can also call llm_query(prompt) to ask\n"
-        "a sub-LM for help with a chunk.\n"
-        'Emit code in a ```repl block."""\n',
-        encoding="utf-8",
-    )
-    return root
-
-
-class TestStripSubLmCalls:
-    def test_finds_both_the_globals_and_the_prompt(self, tree):
-        report = strip.scan(tree)
-        assert len(report.globals_) == 2  # the import and the env binding
-        assert report.prompts, "the prompt mention must be found too"
-        assert not report.clean
-
-    def test_apply_edits_code_bindings(self, tree):
-        strip.apply(strip.scan(tree))
-        source = (tree / "repl.py").read_text(encoding="utf-8")
-        assert "# from rlm.sub import llm_query" in source
-        assert strip.MARKER in source
-
-    def test_apply_never_touches_prompt_text(self, tree):
-        """Commenting inside a triple-quoted string does not remove it from the
-        prompt -- it puts a '#' in the string and the model still reads it."""
-        before = (tree / "prompts.py").read_text(encoding="utf-8")
-        strip.apply(strip.scan(tree))
-        assert (tree / "prompts.py").read_text(encoding="utf-8") == before
-
-    def test_a_commented_prompt_line_is_still_reported(self, tree):
-        """The trap: a '#' inside a prompt block must not read as 'handled'."""
-        (tree / "prompts.py").write_text(
-            'SYSTEM_PROMPT = """You have a Python REPL.\n'
-            "# You can also call llm_query(prompt) to ask a sub-LM.\n"
-            'Emit code in a ```repl block."""\n',
-            encoding="utf-8",
-        )
-        report = strip.scan(tree)
-        assert report.prompts, "a '#' inside a prompt string is text, not a comment"
-
-    def test_a_genuinely_commented_out_binding_is_not_reported(self, tree):
-        (tree / "repl.py").write_text(
-            "# from rlm.sub import llm_query  # removed\n"
-            "def build_globals(context):\n"
-            '    return {"context": context}\n',
-            encoding="utf-8",
-        )
-        assert strip.scan(tree).globals_ == []
-
-    def test_a_dict_key_binding_is_a_global_not_prompt_text(self, tree):
-        """{"llm_query": fn} is the binding that matters most; it must not be
-        misfiled as prompt text just because the key is a string."""
-        (tree / "repl.py").write_text(
-            "def build_globals(context):\n"
-            '    return {"context": context, "llm_query": llm_query}\n',
-            encoding="utf-8",
-        )
-        report = strip.scan(tree)
-        assert [h.kind for h in report.globals_] == ["global"]
-
-    def test_backups_are_written_before_editing(self, tree):
-        strip.apply(strip.scan(tree))
-        assert (tree / "repl.py.bak").exists()
-
-    def test_backups_are_not_rescanned(self, tree):
-        strip.apply(strip.scan(tree))
-        report = strip.scan(tree)
-        assert not any(".bak" in str(h.path) for h in report.globals_ + report.prompts)
-
-    def test_asymmetric_state_is_named_explicitly(self, tree):
-        """Globals stripped, prompt left: worse than doing neither."""
-        strip.apply(strip.scan(tree))
-        report = strip.scan(tree)
-        assert report.globals_ == []
-        assert report.prompts
-        assert report.asymmetric is True
-
-    def test_fully_clean_tree_is_clean_and_not_asymmetric(self, tmp_path):
-        root = tmp_path / "rlm_train"
-        root.mkdir()
-        (root / "repl.py").write_text(
-            "def build_globals(context):\n"
-            '    return {"context": context, "re": __import__("re")}\n',
-            encoding="utf-8",
-        )
-        (root / "prompts.py").write_text(
-            'SYSTEM_PROMPT = """You have a Python REPL. `context` holds the\n'
-            'document. Emit code in a ```repl block."""\n',
-            encoding="utf-8",
-        )
-        report = strip.scan(root)
-        assert report.clean and not report.asymmetric
-
-    def test_non_python_prompt_files_are_scanned(self, tree):
-        (tree / "system.txt").write_text(
-            "You may also call llm_query to ask another model.\n", encoding="utf-8"
-        )
-        assert any(h.path.name == "system.txt" for h in strip.scan(tree).prompts)
-
-    def test_a_missing_root_is_an_error_not_a_clean_report(self, tmp_path):
-        """Scanning the wrong tree and reporting 'clean' is the worst outcome."""
-        with pytest.raises(FileNotFoundError, match="worst outcome"):
-            strip.scan(tmp_path / "nope")
-
-    def test_verify_exit_code_is_nonzero_while_references_remain(self, tree):
-        assert strip.main(["--root", str(tree), "--verify"]) == 1
-
-    def test_verify_exit_code_is_zero_once_clean(self, tmp_path):
-        root = tmp_path / "rlm_train"
-        root.mkdir()
-        (root / "ok.py").write_text("x = 1\n", encoding="utf-8")
-        assert strip.main(["--root", str(root), "--verify"]) == 0
 
 
 class TestProvision:
@@ -267,3 +137,34 @@ class TestSmokeToml:
     def test_trainer_and_inference_are_on_separate_gpus_in_one_pod(self):
         assert self.cfg["inference_gpu_ids"] == [0]
         assert self.cfg["trainer_gpu_ids"] == [1]
+
+
+class TestVerifyAblation:
+    """Guards the case that would spend $5 measuring the wrong experiment."""
+
+    def test_it_reads_the_arm_from_smoke_toml(self):
+        flag = verify_ablation.read_flag(EXPERIMENT_DIR / "smoke.toml")
+        assert flag is False, "smoke.toml must select the no-recursion arm"
+
+    def test_a_config_without_the_flag_returns_none(self, tmp_path):
+        config = tmp_path / "c.toml"
+        config.write_text("max_steps = 20\n", encoding="utf-8")
+        assert verify_ablation.read_flag(config) is None
+
+    def test_it_refuses_a_checkout_without_the_flag(self, tmp_path):
+        """Upstream rlm has no enable_sub_lm; running against it silently
+        measures the with-recursion arm."""
+        results = verify_ablation.check(False, tmp_path / "not-a-checkout")
+        assert results and not all(ok for ok, _ in results)
+        assert "cannot import rlm" in results[0][1]
+
+    def test_all_four_sub_lm_names_are_checked(self):
+        """The strip script only knew about llm_query; rlm binds four."""
+        assert set(verify_ablation.SUB_LM_NAMES) == {
+            "llm_query", "llm_query_batched", "rlm_query", "rlm_query_batched"
+        }
+
+    def test_it_also_looks_for_prose_tells_not_just_function_names(self):
+        """A prompt clean of the names but still describing sub-LLMs is the
+        same failure in slower motion."""
+        assert "sub-LLM" in verify_ablation.PROMPT_TELLS

@@ -42,18 +42,30 @@ rollouts_per_example = 4        # 8 x 4 = 32 rollouts/step, 640 for the run
 [orchestrator.train.sampling]
 max_completion_tokens = 2048
 
+[env]
+# WILL BITE #3, now a config value rather than a source edit.
+#
+# Selects the no-recursion arm. One flag drives the REPL globals, the system
+# prompt, the orchestrator addendum and the rubric's sub-call gate, so the
+# state that used to be the real danger -- a prompt offering `llm_query` to a
+# REPL that no longer binds it, every rollout dying on NameError while the run
+# looks healthy -- is unrepresentable rather than merely detected.
+#
+# Requires the pinned fork (see setup.sh). Upstream rlm has no such flag.
+enable_sub_lm = false
+
 [orchestrator.train.sampling.extra_body]
 # WILL BITE #2. Qwen3-8B is hybrid-thinking. Left enabled, trajectories spend
 # their whole token budget on reasoning traces before ever reaching the REPL.
 # The run looks completely alive and produces nothing usable.
 enable_thinking = false
 
-## WILL BITE #3 is not in this file. Sub-LM calls must be stripped from BOTH the
-## REPL globals and the system prompt in training/src/rlm_train/ -- see
-## strip_sub_lm_calls.py. Removing them from only one is worse than removing
-## them from neither: a leftover prompt mention means the model keeps calling
-## llm_query, every rollout dies on NameError, and the run looks healthy from
-## outside while scoring zeros.
+## WILL BITE #3 is handled above by `enable_sub_lm = false`, and is worth
+## understanding rather than just setting. Sub-LM availability is expressed in
+## four places in rlm: the REPL globals (bound twice -- once at setup and again
+## by _restore_scaffold after every turn), the system prompt, the orchestrator
+## addendum, and the OOLONG rubric's min_subcall gate. Any disagreement between
+## them fails silently. The fork drives all four from this one flag.
 
 [logging.wandb]
 project = "rlm-context-management"
