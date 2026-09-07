@@ -71,9 +71,29 @@ class TestProvision:
     def test_dry_run_redacts_secrets(self, monkeypatch, capsys):
         monkeypatch.setenv("RUNPOD_API_KEY", "super-secret-key")
         monkeypatch.setenv("HF_TOKEN", "hf_secret")
+        monkeypatch.setenv("WANDB_API_KEY", "wandb_secret")
         assert provision.main(["--spend-cap-confirmed", "--dry-run"]) == 0
         out = capsys.readouterr().out
         assert "super-secret-key" not in out and "hf_secret" not in out
+
+    def test_a_lowercase_wandb_key_is_still_found_locally(self, monkeypatch):
+        """Windows env vars are case-insensitive, Linux ones are not -- a
+        lowercase key in .env resolves here and vanishes on the pod."""
+        monkeypatch.setenv("RUNPOD_API_KEY", "k")
+        monkeypatch.setenv("HF_TOKEN", "t")
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+        monkeypatch.setenv("wandb_api_key", "lower")
+        assert provision.main(["--spend-cap-confirmed", "--dry-run"]) == 0
+
+    def test_a_missing_wandb_key_is_refused_because_it_blinds_the_monitor(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("RUNPOD_API_KEY", "k")
+        monkeypatch.setenv("HF_TOKEN", "t")
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+        monkeypatch.delenv("wandb_api_key", raising=False)
+        assert provision.main(["--spend-cap-confirmed", "--dry-run"]) == 2
+        assert "sentinel is blind" in capsys.readouterr().err
 
     def test_missing_hf_token_is_caught_before_provisioning(self, monkeypatch, capsys):
         """Not at the end of a successful run, when the disk is about to die."""

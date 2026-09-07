@@ -152,7 +152,8 @@ def cmd_digest(args: argparse.Namespace) -> int:
         else {},
     )
 
-    digest = build_digest(ctx, rollouts_per_step=args.rollouts_per_step)
+    digest = build_digest(ctx, rollouts_per_step=args.rollouts_per_step,
+                          billing_lead_s=args.billing_lead_min * 60.0)
     print(digest.as_text())
     _emit(digest.as_dict(), args.json)
 
@@ -275,6 +276,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="POST the digest to the configured Hermes webhook")
     digest.add_argument("--rollouts-per-step", type=int, default=None,
                         help="used for the reward noise band; V0 is 32")
+    digest.add_argument("--billing-lead-min", type=float, default=0.0,
+                        help="minutes the pod was billing before the run started "
+                             "(provisioning + setup). Only used when RunPod cannot "
+                             "be read, to keep the spend figure honest.")
     digest.set_defaults(func=cmd_digest)
 
     snapshot = add_config(subparsers.add_parser(
