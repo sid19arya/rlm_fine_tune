@@ -134,9 +134,20 @@ class TestSmokeToml:
         orchestrator = self.cfg["orchestrator"]
         assert orchestrator["batch_size"] * orchestrator["rollouts_per_example"] == 32
 
-    def test_trainer_and_inference_are_on_separate_gpus_in_one_pod(self):
-        assert self.cfg["inference_gpu_ids"] == [0]
-        assert self.cfg["trainer_gpu_ids"] == [1]
+    def test_trainer_and_inference_split_two_gpus_in_one_pod(self):
+        """prime-rl needs the trainer and inference server on the same node."""
+        deployment = self.cfg["deployment"]
+        assert deployment["gpus_per_node"] == 2
+        assert deployment["num_train_gpus"] == 1
+        assert deployment["num_infer_gpus"] == 1
+
+    def test_it_matches_the_prime_rl_schema_not_the_spec_prose(self):
+        """Env kwargs only reach load_environment through this one table."""
+        args = self.cfg["orchestrator"]["train"]["env"][0]["args"]
+        assert args["enable_sub_lm"] is False
+        assert args["dataset_name"] == "spam"
+        assert args["min_subcall"] == 0
+        assert self.cfg["orchestrator"]["train"]["env"][0]["id"] == "oolong"
 
 
 class TestVerifyAblation:
@@ -168,3 +179,21 @@ class TestVerifyAblation:
         """A prompt clean of the names but still describing sub-LLMs is the
         same failure in slower motion."""
         assert "sub-LLM" in verify_ablation.PROMPT_TELLS
+
+    def test_the_flag_is_read_from_the_table_prime_rl_actually_uses(self, tmp_path):
+        """Only [orchestrator.train.env.args] becomes load_environment kwargs."""
+        config = tmp_path / "c.toml"
+        config.write_text(
+            "[orchestrator.train.env.args]\nenable_sub_lm = false\n", encoding="utf-8"
+        )
+        assert verify_ablation.read_flag(config) is False
+
+    def test_a_flag_in_the_wrong_table_is_caught_as_dead_config(self, tmp_path):
+        """It looks right to a reader and does nothing at all."""
+        config = tmp_path / "c.toml"
+        config.write_text("[env]\nenable_sub_lm = false\n", encoding="utf-8")
+        assert verify_ablation.read_flag(config) is None
+        assert verify_ablation.misplaced_flag(config) == "env"
+
+    def test_the_real_smoke_toml_has_no_misplaced_flag(self):
+        assert verify_ablation.misplaced_flag(EXPERIMENT_DIR / "smoke.toml") is None
