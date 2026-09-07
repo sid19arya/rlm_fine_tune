@@ -29,13 +29,20 @@ import httpx
 
 RUNPOD_API = "https://rest.runpod.io/v1"
 
-# A40 first, A6000 as the documented fallback when A40 is out of stock.
-GPU_PREFERENCES = (
-    ("NVIDIA A40", 0.44),
-    ("NVIDIA RTX A6000", 0.49),
-)
+# `gpuTypeIds` takes RunPod's display names and is a list, which the API reads
+# as "any of these". A40 first with the A6000 as the documented fallback, so
+# stock-out is handled by RunPod at placement rather than by us polling a
+# catalogue first. Both are Ampere and both were priced for this budget; nothing
+# else belongs in this list, because a substituted GPU would make the
+# seconds-per-step number this run exists to produce non-transferable.
+GPU_PREFERENCES = ("NVIDIA A40", "NVIDIA RTX A6000")
+
+#: Indicative only -- the real figure comes back on the created pod as
+#: `costPerHr` and is what should go in the monitor config.
+EXPECTED_PRICE_PER_GPU = {"NVIDIA A40": 0.44, "NVIDIA RTX A6000": 0.49}
 
 POD_SPEC = {
+    "computeType": "GPU",
     "cloudType": "SECURE",
     "gpuCount": 2,
     "containerDiskInGb": 30,
@@ -43,7 +50,9 @@ POD_SPEC = {
     "volumeMountPath": "/workspace",
     "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
     "ports": ["22/tcp", "8000/http"],
-    # No networkVolumeId. See the module docstring.
+    "interruptible": False,   # a spot pod dying mid-run is not a saving here
+    # No networkVolumeId, and no dataCenterIds: both pin placement, and pinning
+    # is what makes a 2x A40 request fail on stock. See the module docstring.
 }
 
 
@@ -59,46 +68,47 @@ def _client(api_key: str) -> httpx.Client:
     )
 
 
-def available_gpu(client: httpx.Client) -> tuple[str, float]:
-    """Pick the first preferred GPU type that is actually in stock."""
-    response = client.get("/gpuTypes")
+def check_auth(client: httpx.Client) -> int:
+    """Prove the key works and report how many pods already exist.
+
+    Listing is RunPod's own connectivity test -- an empty list is a pass. It
+    also catches the case where a previous run was left running: provisioning a
+    second 2x A40 pod on top of a forgotten one doubles the burn silently.
+    """
+    response = client.get("/pods")
     if response.status_code in (401, 403):
         raise ProvisionError(
             "RunPod rejected the API key. It must exist and have write scope -- a "
-            "read-only key can list GPUs but cannot create or terminate a pod, which "
+            "read-only key can list pods but cannot create or terminate one, which "
             "means nothing could stop the spend once it starts."
         )
     response.raise_for_status()
-    catalogue = {g.get("displayName") or g.get("id"): g for g in response.json()}
-
-    for name, expected_price in GPU_PREFERENCES:
-        entry = catalogue.get(name)
-        if entry is None:
-            continue
-        stock = entry.get("secureCloud", entry.get("stockStatus"))
-        if stock in (False, "None", "none", 0):
-            print(f"  {name}: out of stock, trying the next preference")
-            continue
-        price = float(entry.get("securePrice") or entry.get("costPerHr") or expected_price)
-        return str(entry.get("id") or name), price
-
-    raise ProvisionError(
-        f"none of {[n for n, _ in GPU_PREFERENCES]} are available in Secure Cloud. "
-        f"Wait, or escalate -- do not silently substitute a different GPU, because "
-        f"the seconds-per-step number this run exists to produce would not transfer."
-    )
+    pods = response.json()
+    return len(pods) if isinstance(pods, list) else 0
 
 
-def create_pod(client: httpx.Client, gpu_id: str, name: str, env: dict[str, str]) -> dict:
+def create_pod(client: httpx.Client, name: str, env: dict[str, str]) -> dict:
+    """Create the pod, letting RunPod pick from the preferred GPU list.
+
+    `gpuTypeIds` is a list the API treats as "any of these", so stock-out
+    falls back to the A6000 at placement time rather than needing a catalogue
+    lookup first -- there is no v1 endpoint for that, and polling one would
+    race the actual allocation anyway.
+    """
     payload = {
         **POD_SPEC,
         "name": name,
-        "gpuTypeIds": [gpu_id],
+        "gpuTypeIds": list(GPU_PREFERENCES),
         "env": env,
     }
     response = client.post("/pods", json=payload)
     if response.status_code >= 400:
-        raise ProvisionError(f"pod creation failed ({response.status_code}): {response.text}")
+        raise ProvisionError(
+            f"pod creation failed ({response.status_code}): {response.text[:500]}\n"
+            f"If this is a stock error, neither {' nor '.join(GPU_PREFERENCES)} has "
+            f"2 GPUs free in Secure Cloud right now. Wait and retry rather than "
+            f"substituting a different GPU."
+        )
     return response.json()
 
 
@@ -139,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
              "cannot verify it, and the default cap of $80/hr is not a safety net.",
     )
     parser.add_argument("--name", default="rlm-v0-smoke")
+    parser.add_argument("--allow-existing", action="store_true",
+                        help="provision even though other pods are already billing")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the exact request and exit without spending")
     args = parser.parse_args(argv)
@@ -169,28 +181,64 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # Windows environment variables are case-insensitive; Linux ones are not.
+    # A .env written as `wandb_api_key=` resolves fine here and then silently
+    # does not exist on the pod, so the run trains with no W&B logging and the
+    # whole monitor goes blind. Accept either spelling locally, always export
+    # the canonical one.
+    wandb_key = os.environ.get("WANDB_API_KEY") or os.environ.get("wandb_api_key", "")
+    if not wandb_key:
+        print(
+            "WANDB_API_KEY is not set. The run would train with no metrics, which "
+            "means every liveness and health probe reports `unknown` for the whole "
+            "run and the sentinel is blind.",
+            file=sys.stderr,
+        )
+        return 2
+
     env = {
         "HF_HOME": "/workspace/hf",  # keep weights OFF the 30GB container disk
         "HF_TOKEN": hf_token,
-        "WANDB_API_KEY": os.environ.get("WANDB_API_KEY", ""),
+        "WANDB_API_KEY": wandb_key,
         "RUNPOD_API_KEY": api_key,  # the in-pod watchdog needs to be able to terminate
     }
 
     if args.dry_run:
+        # The exact payload create_pod would POST, with secrets masked. A dry
+        # run that prints something other than the real request is worse than
+        # no dry run at all.
         redacted = {k: ("<set>" if v else "") for k, v in env.items()}
-        print(json.dumps({**POD_SPEC, "name": args.name, "env": redacted}, indent=2))
+        payload = {
+            **POD_SPEC,
+            "name": args.name,
+            "gpuTypeIds": list(GPU_PREFERENCES),
+            "env": redacted,
+        }
+        print(json.dumps(payload, indent=2))
         print("\ndry run: nothing was created and nothing is billing.")
         return 0
 
     with _client(api_key) as client:
-        print("checking GPU availability...")
-        gpu_id, price = available_gpu(client)
-        hourly = price * POD_SPEC["gpuCount"]
-        print(f"  using {gpu_id} x{POD_SPEC['gpuCount']} at ${price:.2f}/hr each "
-              f"= ${hourly:.2f}/hr")
-        print(f"  projected 3h smoke test: ${hourly * 3:.2f}")
+        print("checking auth and existing pods...")
+        existing = check_auth(client)
+        if existing:
+            print(
+                f"\nWARNING: {existing} pod(s) already exist on this account and are "
+                f"billing. Provisioning another doubles the burn. Check the console "
+                f"before continuing.",
+                file=sys.stderr,
+            )
+            if not args.allow_existing:
+                print("Refusing. Re-run with --allow-existing if that is intended.",
+                      file=sys.stderr)
+                return 2
+        print(f"  auth ok, {existing} existing pod(s)")
 
-        pod = create_pod(client, gpu_id, args.name, env)
+        estimate = min(EXPECTED_PRICE_PER_GPU.values()) * POD_SPEC["gpuCount"]
+        print(f"  requesting {POD_SPEC['gpuCount']}x from "
+              f"{' or '.join(GPU_PREFERENCES)}, ~${estimate:.2f}/hr")
+
+        pod = create_pod(client, args.name, env)
         pod_id = pod.get("id")
         if not pod_id:
             raise ProvisionError(f"pod created but no id returned: {pod}")
@@ -198,12 +246,25 @@ def main(argv: list[str] | None = None) -> int:
 
         pod = wait_until_running(client, pod_id)
 
+    # The real rate, from the pod itself. This is the figure that belongs in
+    # the monitor config -- the list price is an estimate and can be wrong.
+    hourly = float(pod.get("costPerHr") or 0.0)
+    gpu = pod.get("machineType") or pod.get("gpuTypeId") or "?"
+    public_ip = pod.get("publicIp") or "<see console>"
+    ssh_port = next(
+        (str(m.get("publicPort")) for m in (pod.get("portMappings") or [])
+         if str(m.get("privatePort")) == "22"),
+        "<see console>",
+    )
+
+    print("\n--- provisioned ---")
+    print(f"  pod:          {pod_id}")
+    print(f"  gpu:          {POD_SPEC['gpuCount']}x {gpu}")
+    print(f"  measured rate ${hourly:.2f}/hr  -> 3h smoke test ~${hourly * 3:.2f}")
     print("\n--- next steps ---")
-    print(f"export RUNPOD_POD_ID={pod_id}")
-    print(f"  hourly rate:  ${hourly:.2f}/hr  (put this in the monitor config's "
-          f"budget.hourly_rate_usd -- measure it, do not guess)")
-    print("  ssh:          check the console for the mapped port, then")
-    print("                ssh root@<ip> -p <port>")
+    print(f"  export RUNPOD_POD_ID={pod_id}")
+    print(f"  set budget.hourly_rate_usd: {hourly:.2f}   (measured, not the list price)")
+    print(f"  ssh root@{public_ip} -p {ssh_port}")
     print("  on the pod:   bash setup.sh   (nvidia-smi first: expect 2 GPUs @ 48GB)")
     print("\nIf anything goes wrong from here, the pod is billing until you stop it:")
     print(f"    rlmwatch kill -c configs/rlm-ft-v0-smoke.yaml --pod-id {pod_id} "
