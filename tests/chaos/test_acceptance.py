@@ -372,11 +372,32 @@ class TestNormalCompletion:
             for _ in range(20):
                 chaos.log_step()
                 chaos.clock.advance(30)
+            # The trainer's own final save, as it finishes. This is the
+            # trainer's responsibility, not the monitor's.
+            chaos.trainer.request_checkpoint()
+            chaos.trainer.wait_for_checkpoint(60)
         chaos.finish_normally()
 
         assert chaos.trainer.checkpoints_saved >= 1
         assert chaos.terminated
         assert chaos.runpod_server.stopped == [POD_ID]
+
+    def test_shutdown_requests_a_checkpoint_without_blocking_on_it(self):
+        """At shutdown the loop is already over, so there is no next safe point.
+
+        Waiting checkpoint_timeout_s for one would stall every clean exit for
+        ten minutes of billing and then terminate anyway.
+        """
+        chaos = build_run({"failsafe": {"checkpoint_timeout_s": 600}})
+        chaos.trainer.can_checkpoint = False  # would block if shutdown waited
+        started = chaos.clock()
+
+        with chaos.watchdog(probes=()):
+            chaos.log_step()
+
+        assert chaos.trainer.checkpoint_requests >= 1, "the monitor should still ask"
+        assert chaos.clock() - started < 600, "shutdown must not wait for a safe point"
+        assert chaos.terminated
 
     def test_completion_reports_spend(self):
         chaos = build_run()

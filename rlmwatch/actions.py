@@ -459,6 +459,14 @@ class EscalationLadder:
         alike.
 
         Order: request checkpoint -> wandb.alert -> wandb.finish -> terminate.
+
+        The checkpoint is **requested, not waited for**. By the time shutdown
+        runs the training loop is already over -- it completed, it raised, or a
+        signal is unwinding it -- so there is no next safe point at which the
+        request could be honoured. Blocking on `checkpoint_timeout_s` here would
+        stall every clean exit for ten minutes of billing and then terminate
+        anyway. The waiting version belongs to L3, which fires while the loop is
+        still running and can still reach a safe point.
         """
         action = action or self.cfg.failsafe.on_terminal
         verdict = Verdict(
@@ -469,9 +477,19 @@ class EscalationLadder:
         )
         log.warning("shutdown(%s) -> %s", reason, action)
         if self.trainer is not None:
-            self._checkpoint_and_halt()
+            try:
+                self.trainer.request_checkpoint()
+            except Exception as exc:  # noqa: BLE001 - never block the kill path
+                log.warning("checkpoint request during shutdown failed: %s", exc)
         self.notifier.notify(verdict, Level.TERMINATE.label)
         self._terminate(verdict, action)
+        # Recorded so "what did the monitor do?" is answerable from one place.
+        # A shutdown is the most consequential action the ladder ever takes and
+        # it should not be the only one missing from the audit trail.
+        self.history.append(
+            ActionRecord(verdict, Level.TERMINATE, confirmed=True,
+                         steps=["log", "notify", f"terminate({action})"])
+        )
 
 
 def install_signal_handlers(ladder: EscalationLadder, *, signal_module=None) -> None:
