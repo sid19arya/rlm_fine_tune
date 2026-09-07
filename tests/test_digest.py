@@ -237,3 +237,56 @@ def test_config_requires_a_secret_alongside_the_hermes_route():
     cfg = from_dict({**base, "notify": {"hermes_webhook": "http://h:8644/webhooks/r",
                                         "hermes_secret": "s"}})
     assert cfg.notify.hermes_webhook.endswith("/webhooks/r")
+
+
+class TestWandbOnlySpend:
+    """An observer with only a W&B key must still report honest spend."""
+
+    def test_spend_falls_back_to_wandb_runtime(self, make_ctx, wandb_run):
+        wandb_run.summary["_runtime"] = 3600.0  # 1h since wandb.init()
+        ctx = make_ctx(runpod=None, local={"step": 10, "max_steps": 20})
+        digest = build_digest(ctx)
+        # 1h at $0.88/hr; the test config declares no storage_gb.
+        assert digest.spend_usd == pytest.approx(0.88, rel=1e-3)
+
+    def test_the_provisioning_lead_is_added_back(self, make_ctx, wandb_run):
+        """_runtime starts at wandb.init(); billing started earlier."""
+        wandb_run.summary["_runtime"] = 3600.0
+        ctx = make_ctx(runpod=None, local={"step": 10, "max_steps": 20})
+        without = build_digest(ctx).spend_usd
+        with_lead = build_digest(ctx, billing_lead_s=30 * 60).spend_usd
+        assert with_lead > without
+        assert with_lead == pytest.approx(without * 1.5, rel=0.01)
+
+    def test_no_runtime_means_no_invented_spend(self, make_ctx):
+        ctx = make_ctx(runpod=None)
+        assert build_digest(ctx).spend_usd is None
+
+
+class TestHermesBriefing:
+    """The briefing is an interface. If it drifts from the code, the agent
+    reporting on the run is reporting the wrong thresholds."""
+
+    def setup_method(self):
+        from pathlib import Path
+        self.text = (Path(__file__).resolve().parent.parent / "docs" / "HERMES.md"
+                     ).read_text(encoding="utf-8")
+
+    def test_every_tracked_metric_and_window_is_documented(self):
+        from rlmwatch.digest import TRACKED
+
+        for key, _label, (lo, hi), _wanted, _note in TRACKED:
+            assert key in self.text, f"{key} is tracked in code but absent from HERMES.md"
+            assert f"step {lo}-{hi}" in self.text, f"{key}'s window {lo}-{hi} is not stated"
+
+    def test_it_states_the_noise_band_the_code_computes(self):
+        from rlmwatch.digest import noise_band
+
+        assert f"{noise_band(0.24, 32):.3f}" in self.text
+
+    def test_it_forbids_the_agent_from_terminating(self):
+        """Two systems empowered to kill a run is how a healthy run dies."""
+        assert "never stop or terminate" in self.text
+
+    def test_it_names_the_highest_value_failure(self):
+        assert "reward/std" in self.text and "advantage is zero" in self.text

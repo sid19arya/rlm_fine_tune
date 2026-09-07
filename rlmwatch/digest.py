@@ -299,11 +299,19 @@ def _direction(slope: float, tolerance: float) -> Direction:
 
 
 def build_digest(ctx: Context, *, window: int = 50,
-                 rollouts_per_step: int | None = None) -> Digest:
+                 rollouts_per_step: int | None = None,
+                 billing_lead_s: float = 0.0) -> Digest:
     """Read the run and assemble a digest. Never raises.
 
     An unreadable run produces a digest that says so, rather than an exception
     or -- worse -- a confident report built from missing data.
+
+    `billing_lead_s` is how long the pod had been billing before the training
+    run started -- provisioning, setup, the model download. It only matters
+    when RunPod cannot be read and elapsed time has to come from W&B's own
+    `_runtime`, which starts at `wandb.init()` and so understates the bill by
+    exactly that much. Passing it lets a W&B-only observer report honest spend
+    with no RunPod credential at all.
     """
     cfg: RunConfig = ctx.cfg
     digest = Digest(
@@ -356,7 +364,17 @@ def build_digest(ctx: Context, *, window: int = 50,
         n = rollouts_per_step or ctx.local.get("rollouts_per_step") or 32
         digest.reward_band = noise_band(smoothed[-1], int(n))
 
-    hours = elapsed_billed_hours(ctx)
+    hours = None
+    if ctx.runpod is not None:
+        hours = elapsed_billed_hours(ctx)
+    if hours is None:
+        # W&B-only fallback, so an observer with just a W&B key can still
+        # report spend. `_runtime` is seconds since wandb.init(), so the
+        # provisioning lead has to be added back or the figure is optimistic --
+        # and an optimistic spend number is the one you least want to trust.
+        runtime = summary.get("_runtime")
+        if isinstance(runtime, (int, float)):
+            hours = (float(runtime) + billing_lead_s) / 3600.0
     if hours is not None:
         digest.spend_usd = cfg.budget.spend_at(hours)
         if step > 0:
