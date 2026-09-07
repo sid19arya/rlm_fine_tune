@@ -230,3 +230,51 @@ class TestVerifyAblation:
 
     def test_the_real_smoke_toml_has_no_misplaced_flag(self):
         assert verify_ablation.misplaced_flag(EXPERIMENT_DIR / "smoke.toml") is None
+
+
+class TestWandbIdentity:
+    """The run path appears in four places. If they disagree, the monitor and
+    Hermes address a run that does not exist and report `unknown` all run."""
+
+    @property
+    def path(self) -> str:
+        return (f"{provision.WANDB_ENTITY}/{provision.WANDB_PROJECT}/"
+                f"{provision.DEFAULT_RUN_ID}")
+
+    def test_the_monitor_config_points_at_the_same_run(self):
+        text = (EXPERIMENT_DIR.parent.parent / "configs"
+                / "rlm-ft-v0-smoke.yaml").read_text(encoding="utf-8")
+        assert self.path in text
+
+    def test_the_hermes_briefing_points_at_the_same_run(self):
+        text = (EXPERIMENT_DIR.parent.parent / "docs"
+                / "HERMES.md").read_text(encoding="utf-8")
+        assert self.path in text
+
+    def test_smoke_toml_declares_the_same_project(self):
+        try:
+            import tomllib
+        except ImportError:  # pragma: no cover - py<3.11
+            import tomli as tomllib
+        cfg = tomllib.loads((EXPERIMENT_DIR / "smoke.toml").read_text(encoding="utf-8"))
+        assert cfg["wandb"]["project"] == provision.WANDB_PROJECT
+
+    def test_the_run_id_is_exported_explicitly(self, monkeypatch, capsys):
+        """W&B generates a random id unless told otherwise, and the display
+        name in smoke.toml is not the id."""
+        monkeypatch.setenv("RUNPOD_API_KEY", "k")
+        monkeypatch.setenv("HF_TOKEN", "t")
+        monkeypatch.setenv("WANDB_API_KEY", "w")
+        assert provision.main(["--spend-cap-confirmed", "--dry-run"]) == 0
+        payload = capsys.readouterr().out
+        assert '"WANDB_RUN_ID"' in payload
+        assert '"WANDB_ENTITY"' in payload
+
+    def test_a_reused_run_id_fails_rather_than_resuming(self, monkeypatch, capsys):
+        """Resuming would splice two runs' step timings together and corrupt
+        the seconds-per-step measurement, which is all V0 produces."""
+        monkeypatch.setenv("RUNPOD_API_KEY", "k")
+        monkeypatch.setenv("HF_TOKEN", "t")
+        monkeypatch.setenv("WANDB_API_KEY", "w")
+        provision.main(["--spend-cap-confirmed", "--dry-run"])
+        assert '"WANDB_RESUME"' in capsys.readouterr().out

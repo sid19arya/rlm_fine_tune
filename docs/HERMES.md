@@ -24,7 +24,7 @@ better". It is not the point, and at this scale it is not measurable.
 
 | | |
 |---|---|
-| W&B run | `sid/rlm-context-management/v0-smoke` |
+| W&B run | `rlm-runpod-1/rlm-context-management/v0-smoke` |
 | Steps | 20 |
 | Rollouts per step | 32 |
 | Hardware | 2x NVIDIA A40 |
@@ -52,7 +52,7 @@ It prints a human-readable summary and, with `--json`, a structured version with
 `too_early` / `on_track` / `overdue` flags per signal. Relay the summary.
 
 **Fallback — read W&B directly** with the public API
-(`wandb.Api().run("sid/rlm-context-management/v0-smoke")`), and apply §3 and §4
+(`wandb.Api().run("rlm-runpod-1/rlm-context-management/v0-smoke")`), and apply §3 and §4
 yourself. If you do this, apply them *literally*. They exist to stop a specific
 misreading.
 
