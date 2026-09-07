@@ -91,7 +91,10 @@ RLM_SHA="${RLM_SHA:-edfe8548f53c265cdc40ac8cf2784137d2707c28}"
 cd /workspace/rlm
 git fetch -q origin && git checkout -q "$RLM_SHA"
 echo "  rlm pinned at $(git rev-parse --short HEAD)"
-uv venv --python 3.12
+# --allow-existing, not --clear: the script is meant to be re-runnable after
+# a late failure, and --clear would throw away installs that already
+# succeeded. Plain `uv venv` hard-fails on an existing .venv.
+uv venv --python 3.12 --allow-existing
 # shellcheck disable=SC1091
 source .venv/bin/activate
 uv pip install -e .
@@ -129,7 +132,26 @@ echo "  training/configs/smoke.toml written"
 log "pre-downloading Qwen3-8B"
 # Not during step 1. A 16GB pull racing the first training step produces a
 # timeout that looks exactly like a hang.
-huggingface-cli download Qwen/Qwen3-8B
+#
+# Via the Python API rather than the CLI. `huggingface-cli` is not installed by
+# any of rlm's dependencies, and in recent huggingface_hub versions the command
+# was renamed to `hf` anyway -- so calling either by name is a coin flip that
+# fails with `command not found` after everything else has already succeeded.
+# snapshot_download is the same code path and is stable across versions.
+uv pip install -q "huggingface_hub>=0.24"
+python - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+
+path = snapshot_download(
+    "Qwen/Qwen3-8B",
+    token=os.environ.get("HF_TOKEN") or None,
+    max_workers=8,
+)
+total = sum(f.stat().st_size for f in __import__("pathlib").Path(path).rglob("*")
+            if f.is_file())
+print(f"model at {path} ({total / 1024**3:.1f} GiB)")
+PY
 
 log "setup complete"
 cat <<'NEXT'

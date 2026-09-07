@@ -196,3 +196,89 @@ never existed.
 `setup.sh` now copies them out of `/proc/1/environ` into `/etc/rp_pod_env`,
 sources it, and appends it to `~/.bashrc` so every later shell inherits them.
 It hard-fails if `WANDB_RUN_ID` is still missing afterwards.
+
+### 23:53Z — setup, attempt 2: env quoting
+
+Died in 3 seconds:
+
+```
+/etc/rp_pod_env: line 6: export: `rlm-v0-smoke': not a valid identifier
+```
+
+`PUBLIC_KEY` is `ssh-ed25519 AAAA... rlm-v0-smoke` — three space-separated
+words — so an unquoted `export` split on them. Values are now written with
+`printf %q`, and `PUBLIC_KEY` is excluded outright (RunPod's start script
+consumes it; nothing downstream needs it). `set -e` caught this before anything
+else ran, which is the cheapest possible way to find it.
+
+Quoting was verified locally against a synthetic `/proc/1/environ` before
+spending another pod-minute on it.
+
+### 23:53:13Z — setup, attempt 3: everything but the model
+
+Env import worked:
+
+```
+imported: HF_HOME HF_TOKEN WANDB_RESUME WANDB_PROJECT WANDB_ENTITY WANDB_RUN_ID WANDB_API_KEY
+```
+
+All green through: hardware check (2x A40, 45489 MiB free each), volume disk,
+HF cache pinned to `/workspace/hf`, uv, the pinned rlm fork, prime-rl clone,
+`rlmwatch==0.1.0` installed from `/workspace/rlm_fine_tune`, and
+`training/configs/smoke.toml` written.
+
+Then, at the last step, `SETUP_EXIT=127`:
+
+```
+=== pre-downloading Qwen3-8B ===
+/root/setup.sh: line 132: huggingface-cli: command not found
+```
+
+`huggingface-cli` is not pulled in by any of rlm's dependencies, and recent
+`huggingface_hub` renamed the command to `hf` — so invoking either by name is a
+coin flip. Replaced with `snapshot_download` from the Python API, which is the
+same code path and stable across versions, plus an explicit
+`huggingface_hub>=0.24` install.
+
+Note the ordering worked in our favour: the download is deliberately the last
+step, so this failed *after* all the expensive setup had succeeded and the
+re-run skips straight past it (the script is idempotent).
+
+### 23:55Z — setup, attempt 4: the 16GB download
+
+Re-running. This is the long step.
+
+### 23:56Z — attempt 5: `uv venv` is not idempotent
+
+```
+error: Failed to create virtual environment
+  Caused by: A virtual environment already exists at: .venv
+```
+
+The script advertised itself as re-runnable and was not. Changed to
+`uv venv --python 3.12 --allow-existing` — deliberately *not* `--clear`, which
+would discard installs that had already succeeded on an earlier attempt.
+
+Confirmed in the same run: `rlm pinned at edfe854`, the `enable_sub_lm` commit.
+
+### 23:56Z — attempt 6: CRLF, self-inflicted
+
+```
+/root/setup.sh: line 11: set: pipefail: invalid option name
+```
+
+`pipefail\r` is not an option name. The file had acquired CRLF line endings —
+**my own doing**: I had rewritten `setup.sh` with Python's `write_text()`, which
+on Windows translates `\n` to `\r\n`. Attempts 1-4 ran fine because those edits
+went through tools that did not translate.
+
+Two fixes:
+- the file is now rewritten via `read_bytes`/`write_bytes`, which does no
+  newline translation;
+- the transfer pipes through `sed 's/\r$//'` on the way to the pod, so a CRLF
+  working copy can never produce this again regardless of how it got that way.
+
+Worth recording as a class: three of the six setup failures were introduced by
+the tooling around the script rather than by the pod. A Windows control machine
+driving a Linux pod has this hazard everywhere, and the cheap defence is to
+normalise at the boundary rather than trust the working copy.
