@@ -29,6 +29,20 @@ import httpx
 
 RUNPOD_API = "https://rest.runpod.io/v1"
 
+# The W&B run's identity, in one place. Everything that has to name this run --
+# the monitor config, the Hermes briefing, prime-rl's own [wandb] table -- has
+# to agree with these, and a test asserts they do.
+#
+# WANDB_RUN_ID is set explicitly and is NOT the same thing as the display name
+# in smoke.toml. W&B's API path is entity/project/<run-id>, and if the id is
+# left to W&B it generates something random like "3xk9p2ab". The monitor and
+# Hermes both need the path before the run exists, so the id is pinned here
+# instead. Getting this wrong is silent: the path simply 404s and every probe
+# reports `unknown` for the whole run.
+WANDB_ENTITY = "rlm-runpod-1"
+WANDB_PROJECT = "rlm-context-management"
+DEFAULT_RUN_ID = "v0-smoke"
+
 # `gpuTypeIds` takes RunPod's display names and is a list, which the API reads
 # as "any of these". A40 first with the A6000 as the documented fallback, so
 # stock-out is handled by RunPod at placement rather than by us polling a
@@ -149,6 +163,12 @@ def main(argv: list[str] | None = None) -> int:
              "cannot verify it, and the default cap of $80/hr is not a safety net.",
     )
     parser.add_argument("--name", default="rlm-v0-smoke")
+    parser.add_argument(
+        "--run-id", default=DEFAULT_RUN_ID,
+        help="W&B run id, which is what the monitor and Hermes address. Bump it "
+             "on a retry (v0-smoke-2): WANDB_RESUME=never means a reused id fails "
+             "rather than resuming into a half-finished run.",
+    )
     parser.add_argument("--allow-existing", action="store_true",
                         help="provision even though other pods are already billing")
     parser.add_argument("--dry-run", action="store_true",
@@ -200,6 +220,18 @@ def main(argv: list[str] | None = None) -> int:
         "HF_HOME": "/workspace/hf",  # keep weights OFF the 30GB container disk
         "HF_TOKEN": hf_token,
         "WANDB_API_KEY": wandb_key,
+        # Set as environment variables rather than trusting prime-rl's [wandb]
+        # table, which has no `entity` key in the reference config. The W&B SDK
+        # honours all of these regardless of what the trainer's config format
+        # supports, so the run lands in a known place with a known id.
+        "WANDB_ENTITY": WANDB_ENTITY,
+        "WANDB_PROJECT": WANDB_PROJECT,
+        "WANDB_RUN_ID": args.run_id,
+        # Fail loudly if this id already exists rather than resuming into a
+        # half-finished run -- resuming would splice two runs' step timings
+        # together and corrupt the seconds-per-step measurement, which is the
+        # only thing V0 produces.
+        "WANDB_RESUME": "never",
         "RUNPOD_API_KEY": api_key,  # the in-pod watchdog needs to be able to terminate
     }
 
@@ -207,7 +239,14 @@ def main(argv: list[str] | None = None) -> int:
         # The exact payload create_pod would POST, with secrets masked. A dry
         # run that prints something other than the real request is worse than
         # no dry run at all.
-        redacted = {k: ("<set>" if v else "") for k, v in env.items()}
+        # Redact credentials only. The W&B identity and the cache path are not
+        # secrets, and they are the part of this payload most worth eyeballing
+        # before spending: a wrong entity or run id is invisible afterwards.
+        secret_keys = {"HF_TOKEN", "WANDB_API_KEY", "RUNPOD_API_KEY"}
+        redacted = {
+            k: ("<set>" if v else "<MISSING>") if k in secret_keys else v
+            for k, v in env.items()
+        }
         payload = {
             **POD_SPEC,
             "name": args.name,
@@ -264,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     print("\n--- next steps ---")
     print(f"  export RUNPOD_POD_ID={pod_id}")
     print(f"  set budget.hourly_rate_usd: {hourly:.2f}   (measured, not the list price)")
+    print(f"  W&B run path: {WANDB_ENTITY}/{WANDB_PROJECT}/{args.run_id}")
     print(f"  ssh root@{public_ip} -p {ssh_port}")
     print("  on the pod:   bash setup.sh   (nvidia-smi first: expect 2 GPUs @ 48GB)")
     print("\nIf anything goes wrong from here, the pod is billing until you stop it:")
