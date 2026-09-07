@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import httpx
 
@@ -139,9 +140,26 @@ def wait_until_running(client: httpx.Client, pod_id: str, timeout_s: float = 600
         if response.status_code < 400:
             last = response.json()
             state = str(last.get("desiredStatus") or last.get("status") or "").upper()
-            if state == "RUNNING":
+            # Readiness is "can I actually reach it", which means a public IP
+            # and a mapped SSH port.
+            #
+            # `desiredStatus` is RUNNING from the instant the pod is rented --
+            # it is the state RunPod is aiming for, not the state it is in, and
+            # waiting on it returns in about four seconds with no IP.
+            # `runtime` looks like the alternative but was still null on an
+            # observed pod that was already accepting SSH, so waiting on that
+            # would have timed out on a perfectly good pod.
+            ip = last.get("publicIp") or ""
+            ssh_port = (last.get("portMappings") or {}).get("22")
+            if state == "RUNNING" and ip and ssh_port:
                 return last
-            print(f"  pod {pod_id}: {state or 'unknown'}...")
+            if state != "RUNNING":
+                detail = state or "unknown"
+            elif not ip:
+                detail = "booting (no IP yet)"
+            else:
+                detail = "booting (no SSH port yet)"
+            print(f"  pod {pod_id}: {detail}...")
         time.sleep(10)
     raise ProvisionError(
         f"pod {pod_id} did not reach RUNNING within {timeout_s:.0f}s. It is still "
@@ -169,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
              "on a retry (v0-smoke-2): WANDB_RESUME=never means a reused id fails "
              "rather than resuming into a half-finished run.",
     )
+    parser.add_argument("--ssh-key", default="~/.ssh/runpod_rlm.pub",
+                        help="public key injected as PUBLIC_KEY; RunPod writes it "
+                             "to authorized_keys at container start")
     parser.add_argument("--allow-existing", action="store_true",
                         help="provision even though other pods are already billing")
     parser.add_argument("--dry-run", action="store_true",
@@ -216,7 +237,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # RunPod's PyTorch template writes PUBLIC_KEY into ~/.ssh/authorized_keys at
+    # container start. It is injected at creation and cannot be added to a pod
+    # that is already running, so a pod provisioned without it is unreachable
+    # and has to be thrown away -- which is exactly what happened the first
+    # time. Refuse up front rather than discover it after paying to boot.
+    public_key = ""
+    key_path = Path(args.ssh_key).expanduser()
+    if key_path.is_file():
+        public_key = key_path.read_text(encoding="utf-8").strip()
+    if not public_key:
+        print(
+            f"No SSH public key at {key_path}. RunPod injects authorized_keys only at "
+            f"pod creation, so a pod without one can never be logged into and has to "
+            f"be terminated and rebuilt. Generate one first:\n"
+            f"    ssh-keygen -t ed25519 -f {key_path.with_suffix('')} -N ''",
+            file=sys.stderr,
+        )
+        return 2
+
     env = {
+        "PUBLIC_KEY": public_key,
         "HF_HOME": "/workspace/hf",  # keep weights OFF the 30GB container disk
         "HF_TOKEN": hf_token,
         "WANDB_API_KEY": wandb_key,
@@ -244,7 +285,8 @@ def main(argv: list[str] | None = None) -> int:
         # before spending: a wrong entity or run id is invisible afterwards.
         secret_keys = {"HF_TOKEN", "WANDB_API_KEY", "RUNPOD_API_KEY"}
         redacted = {
-            k: ("<set>" if v else "<MISSING>") if k in secret_keys else v
+            k: ("<set>" if v else "<MISSING>") if k in secret_keys
+            else (v[:28] + "..." if k == "PUBLIC_KEY" and len(v) > 28 else v)
             for k, v in env.items()
         }
         payload = {
@@ -290,11 +332,10 @@ def main(argv: list[str] | None = None) -> int:
     hourly = float(pod.get("costPerHr") or 0.0)
     gpu = pod.get("machineType") or pod.get("gpuTypeId") or "?"
     public_ip = pod.get("publicIp") or "<see console>"
-    ssh_port = next(
-        (str(m.get("publicPort")) for m in (pod.get("portMappings") or [])
-         if str(m.get("privatePort")) == "22"),
-        "<see console>",
-    )
+    # portMappings is a flat {"<privatePort>": <publicPort>} mapping, not a
+    # list of objects. Getting this wrong crashed the success path of a
+    # provision that had otherwise worked.
+    ssh_port = str((pod.get("portMappings") or {}).get("22") or "<see console>")
 
     print("\n--- provisioned ---")
     print(f"  pod:          {pod_id}")

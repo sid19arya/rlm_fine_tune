@@ -13,6 +13,34 @@ set -euo pipefail
 log() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\nSETUP FAILED: %s\n' "$*" >&2; exit 1; }
 
+log "importing the pod's environment into this shell"
+# Env vars passed at pod creation land in PID 1's environment, but RunPod only
+# writes its OWN vars to /etc/rp_environment -- so an SSH session (and every
+# tmux pane, which is another fresh shell) sees none of them. Left unfixed the
+# trainer would find no WANDB_ENTITY/PROJECT/RUN_ID and W&B would invent a
+# random run id in the default entity, which is exactly the silent failure the
+# pinned run identity exists to prevent.
+POD_ENV=/etc/rp_pod_env
+# Values are shell-quoted with %q, not just prefixed with `export`. PUBLIC_KEY
+# is "ssh-ed25519 AAAA... comment" -- three space-separated words -- so a naive
+# `export PUBLIC_KEY=$value` splits and dies with
+#   export: `rlm-v0-smoke': not a valid identifier
+# PUBLIC_KEY is excluded outright: it is consumed by RunPod's start script to
+# write authorized_keys and nothing downstream needs it in the environment.
+POD_ENV_TMP=$(mktemp)
+tr '\0' '\n' < /proc/1/environ | grep -E '^(WANDB_|HF_)' | while IFS='=' read -r k v; do
+  printf 'export %s=%q\n' "$k" "$v"
+done > "$POD_ENV_TMP"
+mv "$POD_ENV_TMP" "$POD_ENV"
+chmod 600 "$POD_ENV"
+# shellcheck disable=SC1090
+set -a; source "$POD_ENV"; set +a
+grep -q "source $POD_ENV" ~/.bashrc || echo "source $POD_ENV" >> ~/.bashrc
+echo "  imported: $(sed -E 's/=.*//; s/export //' "$POD_ENV" | tr '\n' ' ')"
+
+: "${WANDB_RUN_ID:?WANDB_RUN_ID did not survive into this shell -- the monitor and \
+Hermes address the run by id, and without it W&B will generate a random one.}"
+
 log "verifying the hardware matches what was provisioned"
 nvidia-smi || die "nvidia-smi is not available; this is not a GPU pod"
 

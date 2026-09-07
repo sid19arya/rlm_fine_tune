@@ -26,7 +26,7 @@ expect:
   checkpoint_dir: /workspace/outputs
 
 startup:
-  deadline_s: 1800    # setup includes a 16GB model download
+  deadline_s: 3600    # clone + install + a 16GB model download
   # Terminate, not stop: a gate failure happens before the first step, so there
   # is nothing on the disk worth the storage bill.
   on_failure: terminate
@@ -65,7 +65,7 @@ health:
 budget:
   # MEASURE this from the provisioned pod, do not guess. provision.py prints
   # the figure. 2x A40 at $0.44 = $0.88/hr; A6000 fallback is $0.98/hr.
-  hourly_rate_usd: 0.88
+  hourly_rate_usd: 0.98
   # The V0 budget is "under $5". The cap is unconditional and enforced by the
   # sentinel, so it survives the pod becoming unresponsive.
   max_usd: 5.0

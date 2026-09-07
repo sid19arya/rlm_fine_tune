@@ -632,8 +632,14 @@ class TestAdditionalBar:
         assert any(v.probe == "sentinel.dead_mans_switch" for v in result.verdicts)
 
     def test_a_pod_that_never_reports_startup_ok_is_terminated(self):
-        """Covers the crash W&B can never see: one before wandb.init()."""
+        """Covers the crash W&B can never see: one before wandb.init().
+
+        The run must have logged nothing at all. A run that is logging has
+        plainly started, and the deadline check treats that as sufficient --
+        terminating an actively-logging run would be self-destructive.
+        """
         chaos = build_run(startup_ok=False)
+        chaos.run.summary.clear()
         chaos.clock.advance(chaos.cfg.startup.deadline_s + 60)
 
         result = chaos.sentinel().tick()

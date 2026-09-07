@@ -50,6 +50,37 @@ def _emit(payload: dict[str, Any], as_json: bool) -> None:
         print(json.dumps(payload, indent=2, default=str))
 
 
+def _log_startup_ok(payload: dict[str, Any]) -> None:
+    """Publish the gate result to W&B so the sentinel can see it.
+
+    Uses `resume="allow"` against the configured run id: the preflight gate
+    runs before the trainer, so it creates the run, and the trainer then
+    resumes into it. Without this the flag never reaches W&B at all.
+    """
+    try:
+        import wandb  # noqa: PLC0415 - optional dependency
+    except ImportError:
+        print("wandb not installed; startup_ok not published", file=sys.stderr)
+        return
+    run_id = os.environ.get("WANDB_RUN_ID")
+    if not run_id:
+        print("WANDB_RUN_ID not set; startup_ok not published", file=sys.stderr)
+        return
+    try:
+        run = wandb.init(
+            id=run_id,
+            project=os.environ.get("WANDB_PROJECT"),
+            entity=os.environ.get("WANDB_ENTITY"),
+            resume="allow",
+            reinit=True,
+        )
+        run.log(payload)
+        run.finish()
+        print(f"published startup_ok to {run_id}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - never block the gate on telemetry
+        print(f"could not publish startup_ok: {exc}", file=sys.stderr)
+
+
 def cmd_preflight(args: argparse.Namespace) -> int:
     """Run the startup gate. Intended to be the first thing the pod does."""
     from rlmwatch.actions import EscalationLadder
@@ -89,7 +120,10 @@ def cmd_preflight(args: argparse.Namespace) -> int:
             diagnostics=Diagnostics(cfg, runpod=runpod, wandb=wandb_client),
             runpod=runpod,
         )
-        result = gate_and_enforce(sctx, ladder=ladder)
+        # log_result publishes startup_ok to W&B. Without it the sentinel's
+        # startup-deadline check has nothing to observe and would terminate
+        # a perfectly healthy pod when the deadline expired.
+        result = gate_and_enforce(sctx, ladder=ladder, log_result=_log_startup_ok)
 
     for verdict in result.verdicts:
         print(verdict)

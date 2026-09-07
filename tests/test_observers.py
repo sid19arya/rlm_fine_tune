@@ -163,8 +163,13 @@ class TestSentinel:
         assert sentinel.check_startup_deadline() is None
 
     def test_missing_startup_ok_past_the_deadline_fails(self, cfg, ladder, wandb_client,
-                                                        runpod_client):
-        """The only way to catch a crash before wandb.init()."""
+                                                        runpod_client, wandb_run):
+        """The only way to catch a crash before wandb.init().
+
+        The run has to have logged *nothing* -- a run with a timestamp is one
+        that plainly started, and terminating it would be self-destructive.
+        """
+        wandb_run.summary.clear()
         late = NOW + cfg.startup.deadline_s + 60
         sentinel = self.make(cfg, ladder, wandb_client, runpod_client,
                              now=lambda: late, pod_created_at=NOW)
@@ -182,7 +187,9 @@ class TestSentinel:
         assert sentinel.startup_ok_seen is True
 
     def test_a_pod_that_never_started_is_terminated(self, cfg, ladder, wandb_client,
-                                                    runpod_client, runpod_server):
+                                                    runpod_client, runpod_server,
+                                                    wandb_run):
+        wandb_run.summary.clear()
         late = NOW + cfg.startup.deadline_s + 60
         sentinel = self.make(cfg, ladder, wandb_client, runpod_client, now=lambda: late)
         result = sentinel.tick()
@@ -311,3 +318,46 @@ def test_dry_run_sentinel_caps_the_ladder_at_notify(cfg, sink, runpod_client):
     assert record.level == Level.NOTIFY
     assert ladder.terminated is False
     assert RUN_PATH  # config fixture sanity
+
+
+class TestStartupDeadlineIsNotSelfDestructive:
+    """The sentinel must not terminate a pod whose run is plainly alive.
+
+    The original check accepted only an explicit `startup_ok` flag. Nothing in
+    the CLI published one, so the deadline would expire mid-setup and the
+    sentinel would terminate a healthy pod it was supposed to be protecting.
+    """
+
+    def make(self, cfg, ladder, wandb_client, runpod_client, now):
+        return Sentinel(cfg, ladder=ladder, wandb_client=wandb_client,
+                        runpod_client=runpod_client, probes=(), now=lambda: now,
+                        sleep=lambda _: None, pod_created_at=NOW)
+
+    def test_a_logging_run_satisfies_the_deadline_without_the_flag(
+        self, cfg, ladder, wandb_client, runpod_client, wandb_run
+    ):
+        wandb_run.summary.pop("startup_ok", None)
+        wandb_run.summary["_step"] = 3          # it is plainly training
+        late = NOW + cfg.startup.deadline_s + 60
+        sentinel = self.make(cfg, ladder, wandb_client, runpod_client, late)
+        assert sentinel.check_startup_deadline() is None
+        assert sentinel.startup_ok_seen is True
+
+    def test_a_run_that_never_appears_still_fails(
+        self, cfg, ladder, wandb_client, runpod_client, wandb_run
+    ):
+        """The check must still catch a crash before wandb.init()."""
+        wandb_run.summary.clear()
+        late = NOW + cfg.startup.deadline_s + 60
+        verdict = self.make(cfg, ladder, wandb_client, runpod_client, late
+                            ).check_startup_deadline()
+        assert verdict is not None and verdict.status == "fail"
+
+    def test_the_explicit_flag_still_works(
+        self, cfg, ladder, wandb_client, runpod_client, wandb_run
+    ):
+        wandb_run.summary.clear()
+        wandb_run.summary["startup_ok"] = 1
+        late = NOW + cfg.startup.deadline_s + 60
+        assert self.make(cfg, ladder, wandb_client, runpod_client, late
+                         ).check_startup_deadline() is None

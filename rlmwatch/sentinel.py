@@ -121,6 +121,20 @@ class Sentinel:
             log.info("startup_ok observed %.0fs after pod creation", age)
             return None
 
+        # A run that is logging has started, whether or not anything set the
+        # explicit flag. `startup_ok` is the stronger signal because the gate
+        # can emit it before training begins, but requiring it would make this
+        # check depend on a specific launcher having wired it -- and a sentinel
+        # that terminates a healthy, actively-logging run because a flag is
+        # missing is far worse than one that notices a little later.
+        if summary.get("_step") is not None or summary.get("_timestamp") is not None:
+            self.startup_ok_seen = True
+            log.info(
+                "run is logging %.0fs after pod creation; treating startup as "
+                "complete (no explicit startup_ok)", age,
+            )
+            return None
+
         if age <= deadline:
             return None
         return Verdict(
