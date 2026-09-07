@@ -125,6 +125,61 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_digest(args: argparse.Namespace) -> int:
+    """Build a training-dynamics digest and optionally send it to Hermes.
+
+    Separate from `watch` on purpose. `watch` is exception-based and should
+    stay quiet on a healthy run; a digest is periodic and speaks whether or not
+    anything is wrong. Running them on separate cadences means a 30-minute
+    digest never delays a stall alert, and a healthy run never generates noise
+    just because the digest is due.
+    """
+    from rlmwatch.clients.runpod import RunPodClient
+    from rlmwatch.clients.wandb import WandbClient
+    from rlmwatch.digest import build_digest
+    from rlmwatch.notify import HermesSink
+    from rlmwatch.probes.base import Context
+
+    cfg = load_config(args.config)
+    runpod = None
+    if cfg.run.pod_id and os.environ.get("RUNPOD_API_KEY"):
+        runpod = RunPodClient(os.environ["RUNPOD_API_KEY"])
+    ctx = Context(
+        cfg=cfg,
+        wandb=WandbClient(os.environ.get("WANDB_API_KEY")),
+        runpod=runpod,
+        local={"rollouts_per_step": args.rollouts_per_step} if args.rollouts_per_step
+        else {},
+    )
+
+    digest = build_digest(ctx, rollouts_per_step=args.rollouts_per_step)
+    print(digest.as_text())
+    _emit(digest.as_dict(), args.json)
+
+    if args.send:
+        if not cfg.notify.hermes_webhook:
+            print("--send needs notify.hermes_webhook in the config", file=sys.stderr)
+            return EXIT_CONFIG
+        sink = HermesSink(cfg.notify.hermes_webhook, cfg.notify.hermes_secret)
+        payload = {
+            "event_type": "rlmwatch.digest",
+            "source": "rlmwatch",
+            "run": cfg.run.name,
+            "summary": digest.headline(),
+            "text": digest.as_text(),
+            **digest.as_dict(),
+        }
+        if sink.post(payload):
+            print("\nsent to Hermes", file=sys.stderr)
+        else:
+            print("\nHermes rejected the digest -- check the route and the secret",
+                  file=sys.stderr)
+            return EXIT_FAIL
+
+    # A digest never fails a run. It reports; the ladder decides.
+    return EXIT_OK
+
+
 def cmd_snapshot(args: argparse.Namespace) -> int:
     """Collect a diagnostic bundle on demand, without touching the run."""
     from rlmwatch.clients.runpod import RunPodClient
@@ -213,6 +268,14 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--dry-run", action="store_true",
                        help="cap the ladder at L1: alert, never kill")
     watch.set_defaults(func=cmd_watch)
+
+    digest = add_config(subparsers.add_parser(
+        "digest", help="report training dynamics (what moved), optionally to Hermes"))
+    digest.add_argument("--send", action="store_true",
+                        help="POST the digest to the configured Hermes webhook")
+    digest.add_argument("--rollouts-per-step", type=int, default=None,
+                        help="used for the reward noise band; V0 is 32")
+    digest.set_defaults(func=cmd_digest)
 
     snapshot = add_config(subparsers.add_parser(
         "snapshot", help="collect a diagnostic bundle now"))

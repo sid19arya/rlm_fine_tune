@@ -100,6 +100,18 @@ notify:
   heartbeat_url: ${HEALTHCHECKS_URL:-}
   console: true
 
+  # Nous Hermes Agent inbound webhook. Hermes relays to whatever channel it is
+  # configured for; rlmwatch is just the trigger.
+  #
+  # The route must exist in the Hermes gateway's config.yaml under
+  # platforms.webhook.extra.routes, and the secret must match. Signed with
+  # Hermes's Generic V2 scheme (HMAC-SHA256 over "<timestamp>.<body>"), which
+  # the gateway replay-protects to +/-300s -- so the pod's clock has to be
+  # roughly right, and a pod with badly skewed time will see every webhook
+  # rejected.
+  hermes_webhook: ${HERMES_WEBHOOK_URL:-}
+  hermes_secret: ${HERMES_WEBHOOK_SECRET:-}
+
 # 60s from outside the pod. The sentinel has to cost under $1/day including
 # API calls, and nothing it watches changes meaningfully faster than this.
 poll_interval_s: 60

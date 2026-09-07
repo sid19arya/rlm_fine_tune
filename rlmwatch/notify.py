@@ -12,9 +12,12 @@ Failures are recorded and surfaced through `last_error` instead.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -145,6 +148,75 @@ class WebhookSink:
         return response.status_code < 400
 
 
+class HermesSink:
+    """Nous Research Hermes Agent inbound webhook.
+
+    Hermes runs a gateway that accepts POSTs at
+    ``http://<host>:8644/webhooks/<route>`` and relays to whatever channel the
+    agent is configured for (Telegram, Discord, Slack, ...). We are the trigger;
+    Hermes decides how to present it.
+
+    Signed with Hermes's **Generic V2** scheme, which is the one to use: the
+    HMAC-SHA256 covers ``<timestamp>.<body>`` and the receiver rejects a
+    timestamp more than 300s from its own clock. V1 signs the body alone and so
+    has no replay protection -- a captured "budget exceeded, terminating" alert
+    could be replayed later. V2 costs nothing extra.
+
+    Note the body is signed **exactly as sent**, so it is serialised once and
+    that byte string is both signed and posted. Re-serialising for the POST is
+    the classic way to produce a signature that never verifies.
+    """
+
+    def __init__(self, url: str, secret: str, *, name: str = "hermes",
+                 client: httpx.Client | None = None, timeout: float = 15.0,
+                 now=None) -> None:
+        if not secret:
+            raise ValueError(
+                "HermesSink requires the shared secret (WEBHOOK_SECRET, or the "
+                "per-route secret from config.yaml). An unsigned webhook is "
+                "rejected by the gateway."
+            )
+        self.url = url
+        self.name = name
+        self._secret = secret.encode("utf-8")
+        self._now = now or time.time
+        self._client = client or httpx.Client(timeout=timeout)
+
+    def payload(self, alert: Alert) -> dict[str, Any]:
+        """What Hermes receives. `event_type` is how routes discriminate."""
+        return {
+            "event_type": f"rlmwatch.{alert.verdict.status}",
+            "source": "rlmwatch",
+            "run": alert.run_name,
+            "summary": alert.title(),
+            "text": alert.as_text(),
+            **alert.as_json(),
+        }
+
+    def send(self, alert: Alert) -> bool:
+        return self.post(self.payload(alert))
+
+    def post(self, payload: dict[str, Any]) -> bool:
+        """Sign and POST an arbitrary payload. Used for digests too."""
+        body = json.dumps(payload, default=str).encode("utf-8")
+        timestamp = str(int(self._now()))
+        signature = hmac.new(
+            self._secret,
+            f"{timestamp}.".encode() + body,
+            hashlib.sha256,
+        ).hexdigest()
+        response = self._client.post(
+            self.url,
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Webhook-Signature-V2": signature,
+                "X-Webhook-Timestamp": timestamp,
+            },
+        )
+        return response.status_code < 400
+
+
 class Notifier:
     """Fan-out across sinks, plus the external heartbeat ping.
 
@@ -173,6 +245,11 @@ class Notifier:
                 )
             if cfg.notify.webhook:
                 self.sinks.append(WebhookSink(cfg.notify.webhook, client=self._client))
+            if cfg.notify.hermes_webhook and cfg.notify.hermes_secret:
+                self.sinks.append(
+                    HermesSink(cfg.notify.hermes_webhook, cfg.notify.hermes_secret,
+                               client=self._client)
+                )
 
     def build(self, verdict: Verdict, level: str, *, spend_usd: float | None = None,
               projected_usd: float | None = None, **extra: Any) -> Alert:
