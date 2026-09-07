@@ -51,9 +51,22 @@ class TestProvision:
         assert provision.POD_SPEC["volumeMountPath"] == "/workspace"
 
     def test_a6000_is_the_documented_fallback_for_a40(self):
-        names = [name for name, _ in provision.GPU_PREFERENCES]
-        assert names[0] == "NVIDIA A40"
-        assert "A6000" in names[1]
+        """gpuTypeIds is a list the API reads as "any of these"."""
+        assert provision.GPU_PREFERENCES[0] == "NVIDIA A40"
+        assert "A6000" in provision.GPU_PREFERENCES[1]
+        # No third GPU: a substitute would make the seconds-per-step number
+        # this run exists to produce non-transferable to V1.
+        assert len(provision.GPU_PREFERENCES) == 2
+
+    def test_it_requests_a_non_interruptible_gpu_pod(self):
+        """A spot pod dying mid-run is not a saving here."""
+        assert provision.POD_SPEC["computeType"] == "GPU"
+        assert provision.POD_SPEC["interruptible"] is False
+
+    def test_it_pins_neither_datacenter_nor_network_volume(self):
+        """Both pin placement, and pinning is what makes 2x A40 fail on stock."""
+        assert "dataCenterIds" not in provision.POD_SPEC
+        assert "networkVolumeId" not in provision.POD_SPEC
 
     def test_dry_run_redacts_secrets(self, monkeypatch, capsys):
         monkeypatch.setenv("RUNPOD_API_KEY", "super-secret-key")
