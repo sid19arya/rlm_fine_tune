@@ -1,0 +1,30 @@
+# Secrets — never commit
+.env
+.env.local
+*.key
+*_private.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Run artifacts
+wandb/
+outputs/
+logs/
+snapshots/
+*.jsonl.gz
+
+# OS
+.DS_Store
+Thumbs.db

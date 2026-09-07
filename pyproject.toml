@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rlmwatch"
+version = "0.1.0"
+description = "Monitoring and failsafes for RLM fine-tuning runs on RunPod"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# The library core deliberately does NOT depend on wandb or torch: the
+# sentinel must be installable on a laptop or a $0.01/hr VM, and the
+# fake-backed test suite must run with neither a GPU nor a network.
+wandb = ["wandb>=0.17"]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+rlmwatch = "rlmwatch.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rlmwatch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --timeout=60"
+markers = [
+    "chaos: fault-injection acceptance tests (section 8 of the monitoring spec)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
