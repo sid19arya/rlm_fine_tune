@@ -44,6 +44,14 @@ PROMPT_TELLS = ("sub-LLM", "sub_llm", "sub-LM", "recursively query")
 
 
 def read_flag(config: Path) -> bool | None:
+    """Read `enable_sub_lm` from `[orchestrator.train.env.args]`.
+
+    That table is the only one prime-rl turns into `load_environment` kwargs.
+    The path is spelled out rather than searched for on purpose: an
+    `enable_sub_lm` sitting in any other table is dead config that prime-rl
+    ignores silently, and reporting it as the selected arm would make this
+    script certify the opposite of what would run.
+    """
     try:
         import tomllib
     except ImportError:  # pragma: no cover - py<3.11
@@ -52,10 +60,76 @@ def read_flag(config: Path) -> bool | None:
         data = tomllib.loads(config.read_text(encoding="utf-8"))
     except OSError:
         return None
-    env = data.get("env")
-    if not isinstance(env, dict) or "enable_sub_lm" not in env:
+
+    flags = [
+        bool(args["enable_sub_lm"])
+        for args in _env_arg_tables(data)
+        if "enable_sub_lm" in args
+    ]
+    if not flags:
         return None
-    return bool(env["enable_sub_lm"])
+    if len(set(flags)) > 1:
+        raise ValueError(
+            "training environments disagree on enable_sub_lm. Every environment in "
+            "the train mixture has to be on the same arm, or the run is measuring "
+            "two conditions at once."
+        )
+    return flags[0]
+
+
+def _env_arg_tables(data: dict) -> list[dict]:
+    """Every `[orchestrator.train.env.args]` table in the config.
+
+    `[[orchestrator.train.env]]` is an array of tables -- a train mixture can
+    hold several environments -- so this returns one args dict per entry. A
+    single `[orchestrator.train.env]` table is accepted too, since TOML allows
+    both spellings and prime-rl reads either.
+    """
+    env = data.get("orchestrator", {}).get("train", {}).get("env")
+    entries = env if isinstance(env, list) else [env] if isinstance(env, dict) else []
+    return [
+        entry["args"]
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("args"), dict)
+    ]
+
+
+def misplaced_flag(config: Path) -> str | None:
+    """Find an `enable_sub_lm` outside the args table. Dead config, silently.
+
+    Worth an explicit check: the key looks correct to a reader and does nothing
+    at all, which is the failure mode this whole arm-selection design exists to
+    remove.
+    """
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover - py<3.11
+        import tomli as tomllib  # type: ignore[no-redef]
+    try:
+        data = tomllib.loads(config.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+    live = [id(args) for args in _env_arg_tables(data)]
+
+    def walk(node: object, path: tuple[str, ...]) -> str | None:
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                found = walk(item, (*path[:-1], f"{path[-1]}[{index}]") if path else path)
+                if found:
+                    return found
+            return None
+        if not isinstance(node, dict):
+            return None
+        if "enable_sub_lm" in node and id(node) not in live:
+            return ".".join(path) or "<root>"
+        for key, value in node.items():
+            found = walk(value, (*path, key))
+            if found:
+                return found
+        return None
+
+    return walk(data, ())
 
 
 def check(expect_sub_lm: bool, rlm_root: Path) -> list[tuple[bool, str]]:
@@ -158,12 +232,23 @@ def main(argv: list[str] | None = None) -> int:
                         help="assert the WITH-recursion arm instead")
     args = parser.parse_args(argv)
 
+    stray = misplaced_flag(args.config)
+    if stray is not None:
+        print(
+            f"FAILED: {args.config} has enable_sub_lm under [{stray}], not under\n"
+            f"[orchestrator.train.env.args]. prime-rl only turns that one table into\n"
+            f"load_environment kwargs, so the key you see is dead config and the run\n"
+            f"would use the WITH-recursion arm regardless of what it says.",
+            file=sys.stderr,
+        )
+        return 1
+
     expect = args.expect_sub_lm
     if not expect:
         from_config = read_flag(args.config)
         if from_config is None:
-            print(f"note: no [env].enable_sub_lm in {args.config}; assuming the "
-                  f"no-recursion arm", file=sys.stderr)
+            print(f"note: no enable_sub_lm in [orchestrator.train.env.args] of "
+                  f"{args.config}; assuming the no-recursion arm", file=sys.stderr)
         else:
             expect = from_config
 

@@ -1,78 +1,142 @@
 ## V0 smoke test -- Qwen3-8B, 2x A40, 20 steps, 32 rollouts/step.
 ##
-## Derived from training/configs/rlm-qwen3-30b-example.toml. Three settings here
-## exist specifically to handle the failures that example config invites on
-## Ampere hardware; each is marked WILL BITE and none of them is optional.
+## The schema here is prime-rl's. This file is derived from
+## training/configs/rlm-qwen3-30b-example.toml in the rlm checkout, scaled down
+## to two Ampere GPUs -- keep it structurally aligned with that file. Env kwargs
+## reach `oolong.load_environment` ONLY through `[orchestrator.train.env.args]`,
+## and a key in the wrong table is silently ignored rather than rejected.
 ##
-## Nothing in this file is a tuning knob for V0. If a run is failing, the answer
-## is not to change max_steps, batch_size, or the model -- it is to find out why
-## it is failing. Changing a value to "make it work" invalidates the one number
-## this run exists to produce.
+## Nothing here is a tuning knob for V0. If a run is failing, the answer is not
+## to change max_steps, batch_size or the model -- it is to find out why.
+## Changing a value to "make it work" invalidates the one number this run
+## exists to produce: seconds per step.
 
-inference_gpu_ids = [0]
-trainer_gpu_ids   = [1]
-
-# 20 steps is the whole run. It cannot answer the research question: at 32
-# rollouts/step with roughly binary reward at p~0.24, the standard error per
-# step is 0.43/sqrt(32) ~ +/-7.6 points, so a real 5-point gain is invisible.
-# The deliverable is seconds per step, not the reward curve.
+output_dir = "outputs/rlm-v0-smoke"
 max_steps = 20
+seq_len = 8192
 
 [model]
 name = "Qwen/Qwen3-8B"
 
+[wandb]
+project = "rlm-context-management"
+name = "v0-smoke"
+
+[deployment]
+# Both GPUs in ONE pod: prime-rl needs the trainer and the inference server on
+# the same node. One of each at V0 scale.
+gpus_per_node = 2
+num_train_gpus = 1
+num_infer_gpus = 1
+
+[trainer]
+
 [trainer.model]
 # WILL BITE #1. flash_attention_3 is Hopper-only and will not build on Ampere.
-# The example config assumes A100/H100; the A40 is Ampere. This is the most
-# likely first crash, and it happens during model init rather than at step 1,
-# so it presents as "the run never started" rather than as a config error.
+# The 30B example config assumes A100/H100; the A40 is Ampere. This is the most
+# likely first crash, and it happens during model init, so it presents as "the
+# run never started" rather than as a config error.
+#
+# VERIFY THIS KEY NAME against your prime-rl version before the first launch --
+# the 30B reference config does not set it, so the spelling is not confirmed
+# from anything in the rlm checkout. If prime-rl ignores or rejects it, find its
+# equivalent rather than dropping the setting.
 attn = "flash_attention_2"
-impl = "auto"
+optimization_dtype = "bfloat16"
+reduce_dtype = "bfloat16"
 
-[trainer.model.experimental.lora]
+[trainer.model.lora]
 rank = 32
 alpha = 64
 dropout = 0.0
 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
+[trainer.ckpt]
+interval = 10
+keep_interval = 10
+
+[trainer.optim]
+lr = 5e-5
+
+[inference]
+gpu_memory_utilization = 0.80
+
+[inference.model]
+# ~16GB weights + ~28GB KV on a 48GB A40 is roughly 11 concurrent 16k
+# sequences. Comfortable at this batch size.
+max_model_len = 16384
+enforce_eager = false
+
+[inference.parallel]
+tp = 1
+dp = 1
+
 [orchestrator]
 batch_size = 8
 rollouts_per_example = 4        # 8 x 4 = 32 rollouts/step, 640 for the run
 
+[[orchestrator.filters]]
+type = "zero_advantage"
+enforce = true
+
+[orchestrator.ckpt]
+interval = 10
+keep_interval = 10
+
 [orchestrator.train.sampling]
 max_completion_tokens = 2048
-
-[env]
-# WILL BITE #3, now a config value rather than a source edit.
-#
-# Selects the no-recursion arm. One flag drives the REPL globals, the system
-# prompt, the orchestrator addendum and the rubric's sub-call gate, so the
-# state that used to be the real danger -- a prompt offering `llm_query` to a
-# REPL that no longer binds it, every rollout dying on NameError while the run
-# looks healthy -- is unrepresentable rather than merely detected.
-#
-# Requires the pinned fork (see setup.sh). Upstream rlm has no such flag.
-enable_sub_lm = false
-
-[orchestrator.train.sampling.extra_body]
 # WILL BITE #2. Qwen3-8B is hybrid-thinking. Left enabled, trajectories spend
 # their whole token budget on reasoning traces before ever reaching the REPL.
 # The run looks completely alive and produces nothing usable.
-enable_thinking = false
+extra_body = { enable_thinking = false }
 
-## WILL BITE #3 is handled above by `enable_sub_lm = false`, and is worth
-## understanding rather than just setting. Sub-LM availability is expressed in
-## four places in rlm: the REPL globals (bound twice -- once at setup and again
-## by _restore_scaffold after every turn), the system prompt, the orchestrator
-## addendum, and the OOLONG rubric's min_subcall gate. Any disagreement between
-## them fails silently. The fork drives all four from this one flag.
+[[orchestrator.train.env]]
+id = "oolong"
+name = "oolong-spam-train"
+ratio = 1.0
 
-[logging.wandb]
-project = "rlm-context-management"
-name = "v0-smoke"
+[orchestrator.train.env.args]
+# These become keyword arguments to `oolong.load_environment()`. This table is
+# the only path by which they reach the environment.
+dataset_name = "spam"           # train on the OOLONG-Spam split only
+min_ctx = 32768
+max_ctx = 65536
+exclude_numeric = true
+num_examples = -1
+max_iterations = 12
+sub_max_tokens = 2048
+min_iterations = 2
+
+# WILL BITE #3, and the reason this repo pins a fork of rlm.
+#
+# Selects the no-recursion arm. One flag drives the REPL globals, the system
+# prompt, the orchestrator addendum and the rubric's sub-call gate, so the
+# state that is the real danger -- a prompt offering `llm_query` to a REPL that
+# no longer binds it, every rollout dying on NameError while the run looks
+# perfectly healthy from outside -- is unrepresentable rather than merely
+# detected.
+#
+# Requires sid19arya/rlm @ context-mgmt, pinned in setup.sh. Upstream rlm has
+# no such parameter and `load_environment` would reject it. Run
+# verify_ablation.py before launching: it checks the flag is actually wired,
+# which no amount of reading this file can tell you.
+enable_sub_lm = false
+
+# With sub-LM calls unavailable a sub-call floor would fail `_passes_gates` on
+# every rollout, making `rlm_below_min_subcall` a constant 1 and `gated_reward`
+# a constant 0. The fork forces this to 0 when enable_sub_lm is false; stated
+# explicitly here so the config carries the intent rather than relying on that.
+# (The 30B reference config also uses 0.)
+min_subcall = 0
 
 ## VRAM budget, for reference when reading nvidia-smi:
 ##   inference GPU: ~16GB weights + ~28GB KV  => ~11 concurrent 16k sequences
 ##   trainer GPU:   ~16GB frozen + 0.4GB adapter + activations
 ## Both fit in 48GB with room to spare. If they do not, something else is
 ## resident and the startup gate should have caught it.
+##
+## Why 20 steps cannot answer the research question: at 32 rollouts/step with
+## roughly binary reward at p~0.24, the standard error per step is
+## 0.43/sqrt(32) ~ +/-7.6 points, so a real 5-point gain is invisible. Movement
+## on a task like this appears around 10k-30k cumulative rollouts; V0 produces
+## 640. The deliverable is seconds per step, not the reward curve.
