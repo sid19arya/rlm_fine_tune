@@ -158,6 +158,117 @@ class WandbClient:
         except (TypeError, ValueError):
             return {k: raw[k] for k in getattr(raw, "keys", list)()}
 
+    def latest_step(self, run_path: str) -> int | None:
+        """Current training step: from the summary if present, else from history.
+
+        wandb "shared" mode -- which prime-rl uses, and which is not optional
+        for it -- does not populate `_step` in the run summary. Reading only the
+        summary therefore reports "at step None: nothing has moved yet" for a
+        run that has completed many steps, which makes every probe report
+        `too_early` and leaves the monitor blind against precisely the stack it
+        exists to watch.
+
+        Observed live on 2026-09-08: a run with two completed steps, rich
+        history (perf/throughput, effective_batch_size, errored_rollouts) and a
+        summary containing only `_runtime`, `_timestamp` and `_wandb.runtime`.
+
+        History carries both `step` (the TRAINING step) and `_step` (wandb's
+        own counter, which increments once per log call). Prefer `step`.
+        Reading `_step` here reported step 244 for a run on training step 2 and
+        turned a ~277s/step rate into "17s/step" -- wrong by 16x, and wrong in
+        the optimistic direction, which is the one that gets a 250-step run
+        approved on a false budget.
+        """
+
+        run = self._run(run_path)
+        try:
+            rows = run.history(samples=200, pandas=False)
+        except Exception as exc:  # noqa: BLE001 - any API shape counts as "unknown"
+            raise WandbUnavailable(
+                f"could not read history for {run_path}: {exc}"
+            ) from exc
+
+        for key in ("step", "_step"):
+            best: int | None = None
+            for row in rows or []:
+                value = row.get(key)
+                if isinstance(value, (int, float)) and value == value:  # not NaN
+                    candidate = int(value)
+                    if best is None or candidate > best:
+                        best = candidate
+            if best is not None:
+                return best
+
+        # Only now consider the summary, and only wandb's counter, since a run
+        # that logged nothing to history has nothing better to offer.
+        raw = self.summary(run_path).get("_step")
+        return int(raw) if isinstance(raw, (int, float)) else None
+
+    def step_rate_s(self, run_path: str) -> float | None:
+        """Seconds per training step, measured BETWEEN logged steps.
+
+        Not total_elapsed / step_count. That charges one-time startup to every
+        step and is badly wrong exactly when someone is deciding whether a long
+        run is affordable: on 2026-09-08 it reported 2032s/step for a run whose
+        steps were taking 204-277s, because the elapsed time included a 45min
+        provisioning lead and ~6min of vLLM load. Wrong by 8x, and the error
+        shrinks only as the run gets longer -- so it is least accurate at the
+        moment it is most used.
+
+        Measuring first-to-last logged step removes the startup entirely.
+        Returns None until two steps exist, because one step cannot define a
+        rate.
+        """
+        run = self._run(run_path)
+        try:
+            rows = run.history(samples=500, pandas=False)
+        except Exception as exc:  # noqa: BLE001
+            raise WandbUnavailable(
+                f"could not read history for {run_path}: {exc}"
+            ) from exc
+
+        # Shared mode means MULTIPLE writers (trainer and orchestrator) log
+        # rows for the same run, interleaved and sometimes out of order. Two
+        # rows a couple of seconds apart can straddle a step boundary, so raw
+        # consecutive deltas produced "2s/step" for steps taking 204-277s.
+        # Collapse to one timestamp per step first -- earliest wins, since that
+        # is when the step was recorded rather than when the last writer
+        # flushed.
+        by_step: dict[int, float] = {}
+        for row in rows or []:
+            step = row.get("step")
+            ts = row.get("_timestamp")
+            if not isinstance(step, (int, float)) or not isinstance(ts, (int, float)):
+                continue
+            if step != step or ts != ts:  # NaN
+                continue
+            key = int(step)
+            if key not in by_step or ts < by_step[key]:
+                by_step[key] = float(ts)
+
+        if len(by_step) < 2:
+            return None
+        ordered = sorted(by_step.items())
+
+        # Median of per-step deltas. Not first-to-last: step 0 is logged at its
+        # START, so a span measurement swallows step 0 plus warmup and read
+        # 624s/step. Not elapsed/count either, which charges provisioning to
+        # every step and read 2032s/step. The median additionally survives one
+        # slow step (709s against 204s in the same run) without being dragged.
+        deltas: list[float] = []
+        for (s0, t0), (s1, t1) in zip(ordered, ordered[1:]):
+            span_steps = s1 - s0
+            span_s = t1 - t0
+            if span_steps > 0 and span_s > 0:
+                deltas.append(span_s / span_steps)
+        if not deltas:
+            return None
+        deltas.sort()
+        mid = len(deltas) // 2
+        if len(deltas) % 2:
+            return deltas[mid]
+        return (deltas[mid - 1] + deltas[mid]) / 2.0
+
     def metric_window(self, run_path: str, key: str, n: int = 50) -> list[float]:
         """The most recent `n` finite values of `key`, oldest first.
 

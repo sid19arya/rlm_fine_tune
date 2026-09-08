@@ -243,3 +243,58 @@ class TestUptimeFallback:
         created = datetime.now(timezone.utc) - timedelta(minutes=45)
         pod.created_at = created.strftime("%Y-%m-%d %H:%M:%S.%f +0000 UTC")
         assert runpod.status("pod-1").uptime_s == pytest.approx(2700, abs=10)
+
+
+class TestStepRateFromHistory:
+    """Step rate and step number must come from history, not the summary.
+
+    prime-rl logs in wandb "shared" mode, which does not populate `_step` in the
+    run summary. Every one of these cases was observed live on 2026-09-08
+    against a real training run, and each produced a specific wrong answer.
+    """
+
+    def _client(self, rows, summary=None):
+        from tests.fakes.fake_wandb import FakeRun, FakeWandbApi
+        from rlmwatch.clients.wandb import WandbClient
+
+        api = FakeWandbApi()
+        api.add(FakeRun("e/p/r", summary=summary or {}, history=rows))
+        return WandbClient(api=api)
+
+    def test_step_comes_from_history_when_summary_has_none(self):
+        """The failure that made the monitor blind: summary carried no _step."""
+        rows = [{"step": s, "_timestamp": 1000.0 + 200 * s} for s in range(3)]
+        client = self._client(rows, summary={"_runtime": 900.0})
+        assert client.latest_step("e/p/r") == 2
+
+    def test_training_step_wins_over_the_wandb_counter(self):
+        """`_step` counts log calls, not steps.
+
+        Reading it reported step 244 for a run on training step 2, which turned
+        a ~277s/step rate into 17s/step -- wrong by 16x, and optimistic, which
+        is the direction that gets a long run approved on a false budget.
+        """
+        rows = [{"step": s, "_step": s * 122, "_timestamp": 1000.0 + 200 * s} for s in range(3)]
+        assert self._client(rows).latest_step("e/p/r") == 2
+
+    def test_rate_ignores_duplicate_rows_from_multiple_writers(self):
+        """Trainer and orchestrator both log; raw deltas gave 2s/step."""
+        rows = []
+        for s in range(4):
+            base = 1000.0 + 250 * s
+            rows.append({"step": s, "_timestamp": base})          # orchestrator
+            rows.append({"step": s, "_timestamp": base + 2.0})    # trainer, same step
+        rate = self._client(rows).step_rate_s("e/p/r")
+        assert rate == pytest.approx(250.0), f"expected ~250s/step, got {rate}"
+
+    def test_one_slow_step_does_not_drag_the_estimate(self):
+        """Observed 709s and 204s in the same run; the median must hold."""
+        stamps = [0.0, 709.0, 913.0, 1117.0, 1321.0]
+        rows = [{"step": s, "_timestamp": 1000.0 + t} for s, t in enumerate(stamps)]
+        rate = self._client(rows).step_rate_s("e/p/r")
+        assert rate == pytest.approx(204.0), f"median should be 204s, got {rate}"
+
+    def test_no_rate_from_a_single_step(self):
+        """One step cannot define a rate; saying so beats inventing one."""
+        rows = [{"step": 0, "_timestamp": 1000.0}]
+        assert self._client(rows).step_rate_s("e/p/r") is None

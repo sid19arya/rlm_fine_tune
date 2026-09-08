@@ -353,8 +353,14 @@ def build_digest(ctx: Context, *, window: int = 50,
         return digest
 
     if digest.step is None:
-        raw_step = summary.get("_step")
-        digest.step = int(raw_step) if isinstance(raw_step, (int, float)) else None
+        # Not summary["_step"]: prime-rl logs in wandb shared mode, which leaves
+        # it unset. latest_step() falls back to history, where the counter
+        # actually lives.
+        try:
+            digest.step = ctx.wandb.latest_step(cfg.run.wandb)
+        except WandbUnavailable:
+            raw_step = summary.get("_step")
+            digest.step = int(raw_step) if isinstance(raw_step, (int, float)) else None
     step = digest.step or 0
 
     for key, label, (lo, hi), wanted, note in TRACKED:
@@ -402,7 +408,13 @@ def build_digest(ctx: Context, *, window: int = 50,
     if hours is not None:
         digest.spend_usd = cfg.budget.spend_at(hours)
         if step > 0:
-            digest.seconds_per_step = hours * 3600.0 / step
+            # Prefer the between-steps measurement; elapsed/step charges
+            # one-time startup to every step and reads ~8x high early on.
+            try:
+                measured = ctx.wandb.step_rate_s(cfg.run.wandb)
+            except WandbUnavailable:
+                measured = None
+            digest.seconds_per_step = measured or (hours * 3600.0 / step)
             if digest.max_steps:
                 remaining = max(digest.max_steps - step, 0)
                 digest.eta_hours = remaining * digest.seconds_per_step / 3600.0
