@@ -458,3 +458,66 @@ REPL scaffolding after every turn, so a flag honoured only at setup would have
 restored delegation on turn two, mid-rollout, invisibly.
 
 `rl --help` responds, so prime-rl's entry point is live.
+
+### 00:40Z — GATE FAILED: prime-rl config schema mismatch
+
+Launched under tmux; the run died immediately on config validation:
+
+```
+7 validation errors for RLConfig
+--orchestrator.train.env            Extra inputs are not permitted
+--orchestrator.rollouts-per-example Extra inputs are not permitted (got 4)
+--orchestrator.filters              Extra inputs are not permitted
+--inference.gpu-memory-utilization  Extra inputs are not permitted (got 0.8)
+--inference.model                   Extra inputs are not permitted -- did you mean --model?
+--inference.parallel                Extra inputs are not permitted
+--wandb                             Extra inputs are not permitted
+```
+
+Not typos. prime-rl's schema moved in `d135ed4c9` (2026-07-29),
+*"rename env collections to sources, compose the verifiers config blocks"*:
+`[[orchestrator.train.env]]` with `id`/`args` became
+`[[orchestrator.train.source]]` with `env.taskset.id`.
+
+Version archaeology:
+
+| | commit | date |
+|---|---|---|
+| rlm fork | `854e688` | 2026-08-25 |
+| prime-rl installed | `04a61d3b7` | 2026-09-07 |
+| breaking rename | `d135ed4c9` | 2026-07-29 |
+
+rlm pins no prime-rl version anywhere, and its example config uses
+pre-rename schema despite postdating the rename — so the harness targets an
+older prime-rl than HEAD.
+
+**A correction to an earlier entry.** The "entry point discoverable" check that
+passed at 00:36 verified `oolong` registers under `verifiers.environments` —
+but HEAD prime-rl's config never reads that group. The check passed while
+testing a mechanism this version does not use. It was weaker evidence than it
+appeared, and the config validation is what actually caught the mismatch.
+
+### 00:47Z — pinning prime-rl to 1fd2d732c
+
+Pulled the config from the commit immediately before the rename. It matches
+`smoke.toml` almost exactly — `[deployment] num_train_gpus`, `[wandb]`,
+`[trainer.model.lora]`, `[[orchestrator.train.env]]` all present and correctly
+spelled. Strong evidence the config was right for the wrong version rather than
+simply wrong.
+
+On scope: pinning a dependency is repair, not redefinition. The spec's "may
+not" list is *changing max_steps, batch size or model to make it work*, and
+*install packages, edit config files* is in the "may" column. Rewriting the
+config into HEAD's `source`/`taskset` schema would be redefinition — inferring
+semantics with no rlm example to copy — and that remains a human decision.
+Those two were bundled in the first escalation; they should not have been.
+
+First attempt aborted in seconds:
+
+```
+error: Your local changes to the following files would be overwritten by checkout:
+	.gitmodules
+```
+
+— my own earlier HTTPS rewrite blocking the checkout. `set -e` stopped it
+before `rm -rf .venv`, so the working environment was never damaged.
