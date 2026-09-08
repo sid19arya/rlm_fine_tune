@@ -653,3 +653,97 @@ training step and there would be none. What it produces is base-model
 performance through the REPL harness — useful later as cells A0/A of V1's eval
 protocol, but not V0, and it should not have been offered as an alternative
 without saying so.
+
+---
+
+## Session 2 (03:43-04:56Z) — the pinned commit works; the run does not
+
+### 03:43Z — the stopped pod could not restart
+
+```
+POST /pods/kri19pywwj9kzt/start -> 500
+{"error":"start pod: There are not enough free GPUs on the host machine"}
+```
+
+The A40s were reallocated during the 2.8h pause. This is the risk named when
+`stop` was recommended, and it landed. Terminated and provisioned fresh
+(`pqh54v1mcyare2`). Stopping was still correct: 2.8h running would have been
+~$2.75 against ~$0.03 stopped.
+
+Setup on the fresh pod passed **first time in ~4 minutes**, against six attempts
+and ~40 minutes on the first pod. The fixes paid for themselves.
+
+### 04:02Z — GATE PASSED: the config validates at 083127fe
+
+The archaeology was right. Staged deliberately so the three risks could be told
+apart:
+
+```
+Resolved 452 packages, 384 installed, flash-attn-4 + transformers built  <- deps OK
+rl entrypoint imports OK          <- prime-rl alone (previous pin died here)
+still OK                          <- survived rlm's deps; no verifiers clash
+outputs/rlm-v0-smoke created      <- prime-rl READ output_dir from smoke.toml
+Starting inference on GPU(s) 0 / trainer on GPU(s) 1 / SUCCESS Startup complete
+```
+
+Every key HEAD rejected was accepted. And the experimental condition reached the
+live process:
+
+```
+enable_sub_lm: False   min_subcall: 0   enable_thinking: False
+dataset_name: 'spam'   max_completion_tokens: 2048
+vLLM: max_model_len 16384, enable_lora, max_lora_rank 32
+trainer: attn='flash_attention_2', LoRA 30,670,848 params on 1,509,949,440 base
+```
+
+### 04:11Z — the pinned run id was ignored
+
+`WANDB_RUN_ID=v0-smoke` was set precisely to make the path predictable. prime-rl
+uses wandb **shared mode** and generated `492e1de2ed394ae68e6ec12f34d654a5`;
+`v0-smoke` survived only as the display name. Both the monitor config and the
+Hermes briefing were pointing at a 404. Caught by checking both paths against
+the API rather than assuming the env var won.
+
+Lesson for V1: **read the run id out of the launch log; do not try to set it.**
+
+### 04:22-04:38Z — three self-inflicted failures in a row
+
+1. **Filled the volume.** `UV_CACHE_DIR` on `/workspace` took the 100GB volume
+   to 91GB (two dependency sets). Training died on `Disk quota exceeded` mid
+   weight-conversion, no traceback, whole process group gone.
+2. **`rm -rf` deleted the environment.** uv 0.12 stores environments *inside*
+   the cache dir; `.venv` was a symlink into it.
+3. **`uv cache prune` deleted it again.** 82532 files removed for 10.6MiB --
+   hardlink targets that environment files pointed into.
+
+`UV_CACHE_DIR` is not a disposable cache on uv 0.12. Neither `rm -rf` nor
+`prune` is safe against it.
+
+### 04:54Z — BLOCKED: silent death, cause not found
+
+Four launches, all dying during startup. Every hypothesis tested and excluded:
+
+| Suspected | Evidence |
+|---|---|
+| Disk quota | writes OK, no quota error, 77G of 100G |
+| cgroup OOM | limit 103G, peak 50G, `oom_kill 0` |
+| Host memory | 56G used of 503G |
+| Container disk | 258M of 30G |
+| Python exception | no traceback in any of five logs |
+| tmux / session reaping | **canary test below** |
+
+The canary settled the last one:
+
+```
+canary (sleep 3600 in tmux, started 04:52:25):  ALIVE
+training (setsid, outside tmux):                DEAD
+train4.log:                                      0 bytes
+```
+
+tmux is not being reaped; a process started at the same instant survives. The
+training dies on its own, writing nothing. Consistent with a native-level crash
+-- segfault or a CUDA/driver abort -- that produces no Python output.
+
+Stopped rather than escalate to py-spy/gdb against a process that dies in under
+two minutes writing zero bytes. Pod stopped (not terminated): `$1.13` on this
+pod, **~$2.36 total** of a $5 cap.
