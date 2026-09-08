@@ -51,6 +51,22 @@ alpha = 64
 dropout = 0.0
 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
+# Activation checkpointing. NOT optional at this scale: without it the trainer
+# OOMs in the backward pass on step 1 with
+#   torch.OutOfMemoryError: Tried to allocate 186.00 MiB.
+#   GPU has 44.43 GiB capacity, 176.62 MiB free
+# on a 48GB A6000, and would do the same on a 48GB A40. The failure is in the
+# QKV projection (Linear 4096 -> 12288), i.e. stored activations, not weights:
+# Qwen3-8B bf16 is only ~16GB and LoRA adds 30M trainable params.
+#
+# `full` recomputes whole transformer blocks rather than storing their
+# activations. It costs roughly 30% step time and is what makes the run fit.
+# Note step 0 SUCCEEDS without this -- it collects rollouts and only trains at
+# the step boundary -- so the OOM arrives one step later than the cause.
+[trainer.model.ac]
+mode = "full"
+freq = 1
+
 [trainer.ckpt]
 interval = 10
 keep_interval = 10
