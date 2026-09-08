@@ -201,6 +201,8 @@ class Digest:
     reward_band: float | None = None
     spend_usd: float | None = None
     projected_usd: float | None = None
+    ceiling_usd: float | None = None
+    ceiling_hours: float | None = None
     budget_usd: float | None = None
     seconds_per_step: float | None = None
     eta_hours: float | None = None
@@ -264,10 +266,31 @@ class Digest:
             eta = f", ETA {self.eta_hours:.1f}h" if self.eta_hours else ""
             lines.append(f"Step rate {self.seconds_per_step:.0f}s/step{eta}.")
         if self.spend_usd is not None:
-            projected = (f", projecting ${self.projected_usd:.2f}"
-                         if self.projected_usd is not None else "")
             budget = f" of ${self.budget_usd:.2f} cap" if self.budget_usd else ""
-            lines.append(f"Spend ${self.spend_usd:.2f}{projected}{budget}.")
+            if self.projected_usd is not None:
+                lines.append(
+                    f"Spend ${self.spend_usd:.2f}, projecting "
+                    f"${self.projected_usd:.2f}{budget}."
+                )
+            else:
+                # No completed step means no step rate, and without a step rate
+                # there is nothing to extrapolate from. Emitting the wall-clock
+                # ceiling here and calling it a projection produced a genuinely
+                # alarming first report -- "projecting $25.44 of $5.00 cap" --
+                # for a run that was five minutes into its first step and
+                # perfectly healthy. An observer relaying that verbatim raises
+                # a false alarm before a single step has landed.
+                ceiling = (
+                    f" If it ran to the {self.ceiling_hours:.0f}h wall-clock "
+                    f"limit it would cost ${self.ceiling_usd:.2f}, but that is "
+                    f"a ceiling, not a forecast."
+                    if self.ceiling_usd is not None and self.ceiling_hours
+                    else ""
+                )
+                lines.append(
+                    f"Spend ${self.spend_usd:.2f}{budget}. No projection until "
+                    f"step 1 completes.{ceiling}"
+                )
         if self.wandb_url:
             lines.append(self.wandb_url)
         return "\n".join(lines).rstrip()
@@ -286,6 +309,7 @@ class Digest:
             "eta_hours": self.eta_hours,
             "spend_usd": self.spend_usd,
             "projected_usd": self.projected_usd,
+            "ceiling_usd": self.ceiling_usd,
             "budget_usd": self.budget_usd,
             "wandb_url": self.wandb_url,
             "trends": [t.as_dict() for t in self.trends],
@@ -385,6 +409,10 @@ def build_digest(ctx: Context, *, window: int = 50,
                 total_h = hours + digest.eta_hours
                 digest.projected_usd = cfg.budget.spend_at(total_h)
         if digest.projected_usd is None:
-            digest.projected_usd = cfg.budget.spend_at(cfg.budget.max_wall_clock_h)
+            # Deliberately NOT projected_usd: with no completed step there is no
+            # step rate to extrapolate. This is the wall-clock ceiling, and it
+            # is reported as such.
+            digest.ceiling_usd = cfg.budget.spend_at(cfg.budget.max_wall_clock_h)
+            digest.ceiling_hours = cfg.budget.max_wall_clock_h
 
     return digest

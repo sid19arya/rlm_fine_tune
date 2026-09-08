@@ -992,3 +992,63 @@ free) rather than the quota. The only reliable check is to write a probe file.
 
 Pod `gfbjns3cqfa9cv` terminated (204, 0 pods). Spend this pod ~$0.87;
 running total ~$3.23 of $5.
+
+### 17:29-17:50Z — ROOT CAUSE: the env worker is killed every 30 seconds
+
+Run 6 reached real training on the 200GB pod:
+
+```
+Student inference pool ready
+Initializing weight broadcast (type='filesystem')
+Starting orchestrator loop (max_steps=20)
+Starting orchestrator step 0
+Generating rollouts (train): 0/8
+```
+
+Then nothing for 13 minutes. Both GPUs at 0%, 3 completion requests total,
+CPU workers churning. The tell was that `rlm_train.worker` PIDs changed between
+two samples 25s apart -- not hung, **respawning**.
+
+`logs/envs/train/oolong-spam-train/env_server.log` had it:
+
+```
+EnvRouter - WARNING - Worker 0 heartbeat timeout (32.8s), restarting
+EnvRouter - INFO - Started worker (id=0, name=oolong-0, pid=13535)
+...
+Active tasks: 0 (W0: ?)
+```
+
+`worker_heartbeat_timeout: float = 30.0` in
+`verifiers/serve/server/env_{server,router}.py`. Building a 32768-65536 token
+oolong context takes longer than 30s, so the router kills its own worker
+roughly every 66 seconds, forever. No rollout can ever complete. It is not
+exposed through smoke.toml.
+
+**This is very likely what last session's "silent hang" actually was.** The
+work was being killed faster than it could finish, and with block-buffered
+stdout none of it was visible.
+
+A second defect compounds it, in rlm's own oolong environment:
+
+```
+prompt_messages returned raw dicts/strings instead of vf.Messages.
+This repeatedly triggers normalize_messages
+```
+
+Wrong return type forcing repeated re-normalisation -- slowing the exact step
+that blows the heartbeat. Worth fixing in the fork regardless.
+
+Raised the timeout to 900s on the pod and relaunched (run 7).
+
+### Diagnostic notes
+
+* The error was in a THIRD log level. `train.log` said only "Orchestrator
+  failed"; `trainer.log` had the quota error; the heartbeat kill was in
+  `logs/envs/train/<env>/env_server.log`. Four log levels, and the cause is
+  never in the top one.
+* `py-spy` cannot attach here -- the container lacks CAP_SYS_PTRACE
+  ("Failed to copy Py_Version symbol: Permission denied"). Comparing PIDs and
+  `/proc/<pid>/stat` cpu ticks across samples worked instead, and distinguishes
+  respawn from hang without any privileges.
+* `pkill -9 -f vllm` matched my own ssh command string and killed the session.
+  Kill by PID from `nvidia-smi --query-compute-apps` instead.
