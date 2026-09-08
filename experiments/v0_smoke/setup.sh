@@ -132,6 +132,20 @@ uv pip install -e .
 # An earlier version of this script deferred the whole prime-rl install to its
 # README, so this pin lived only in a shell history and was silently lost on
 # the next pod -- which cost a full session.
+# The rlm block above runs `source .venv/bin/activate`, and VIRTUAL_ENV
+# SURVIVES into this block. Every `uv pip install` below would then target
+# /workspace/rlm/.venv instead of prime-rl's own project environment, putting
+# rlm-train, oolong and orjson somewhere the trainer never looks. The symptom is
+# maximally confusing: the installs all report success, and then the entry-point
+# check says
+#     AssertionError: oolong not registered as a verifiers environment: []
+# uv does warn -- "VIRTUAL_ENV does not match the project environment path" --
+# but it is a warning in a wall of install output.
+#
+# Doing this by hand in a fresh shell works, which is exactly why it survived
+# into a script: the interactive path never has VIRTUAL_ENV set.
+unset VIRTUAL_ENV
+
 PRIME_SHA="${PRIME_SHA:-083127fe}"
 log "cloning prime-rl at pinned $PRIME_SHA"
 [ -d /workspace/prime-rl ] || git clone https://github.com/PrimeIntellect-ai/prime-rl \
