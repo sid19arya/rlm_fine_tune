@@ -845,3 +845,94 @@ for any non-RUNNING pod. 348 tests pass.
 
 That is three defects in one small function, all found by running it against
 live infrastructure and none reachable with fakes.
+
+---
+
+## Session 3 (cont.) — the fresh pod, and what setup.sh had silently lost
+
+### 15:39Z — stock returned; pod `gfbjns3cqfa9cv`
+
+A GraphQL stock poller (free read, 5-min interval) fired at 15:39 and
+auto-provisioned. 2x A40 @ $0.98/hr, `194.68.245.29:22167`. Nothing billed
+during the ~4h wait -- 0 pods.
+
+### 15:42Z — setup.sh finished in 90 seconds. That was the bug.
+
+Last session setup took ~25 minutes. This time: 90s. The model pull was
+genuinely fast (measured 119 MB/s off `/proc/net/dev`, 14GB, 15.3 GiB verified
+on disk) but the real reason was that **setup.sh does not build prime-rl at
+all** -- it cloned the repo and printed "follow prime-rl's README, then re-run".
+
+So the single most valuable result of the previous session -- the pin to
+`083127fe`, found by dating `rlm/training/configs/` -- **lived only in my shell
+history and died with the pod.** The fresh pod came up on HEAD (`04a61d3b7`).
+
+Fixed in `2dde535`. setup.sh now pins, inits submodules and builds.
+
+### 15:43-15:47Z — three named failures in eleven minutes
+
+The instrumented launcher earned itself here. Against four prior launches that
+produced nothing:
+
+| exit | cause | fix |
+|---|---|---|
+| 127 | `stdbuf: failed to run command 'uv'` | uv is in ~/.local/bin, added by ~/.profile, which a detached shell never reads (`492b93d`) |
+| 1 | `prime-pydantic-config does not appear to be a Python project` | submodules never initialised; several use `git@github.com:` SSH URLs and the pod has no key |
+| - | `Failed to clone 'configs/private' a second time, aborting` | at this commit the submodule set includes a PRIVATE repo, and git aborts the WHOLE update on it. Scope to `-- deps` |
+
+**One root cause, three faces: environment that exists only in an interactive
+shell is invisible to a detached process.** PATH, `UV_CACHE_DIR` (set only in
+~/.bashrc; a detached `uv sync` would have put a 15GB cache back on the 30GB
+container disk), and the prime-rl pin itself.
+
+### 15:51-16:00Z — 20 minutes lost to my own shell precedence bug
+
+```
+ssh '... cat > f && chmod +x f && setsid nohup bash f > log 2>&1 &  sleep 2; echo LAUNCHED'
+```
+
+`&` backgrounds the ENTIRE `&&` chain, so `cat` was still reading the script
+from ssh's stdin when `echo LAUNCHED` returned and ssh tore the connection
+down. Result: a **0-byte script**, a **0-byte log**, and a process that
+appeared to start and vanish.
+
+That is precisely the signature I spent last session reading as a native crash.
+Here it was a botched file transfer. It does not overturn the earlier reading
+-- those runs demonstrably printed LoRA parameter counts, so the binary was
+real -- but twice now I have read "0 bytes" as a fact about the trainer when it
+was a fact about my plumbing.
+
+My liveness check was also lying: `pgrep -f bootstrap2.sh` was matching my own
+monitor's ssh command line. Now `pgrep -c -f "bash /root/bootstrap2.sh"`.
+
+### 16:01-16:12Z — build, and two monitors that lied by omission
+
+`uv sync` in ~8 min (vs ~20 last session). Then:
+
+- **Watcher v1 emitted nothing when the log stayed empty** -- a script that
+  never started looked identical to quiet progress. Exactly the failure mode the
+  tooling docs warn about. Fixed by treating a flat log as an event.
+- **Watcher v2 mis-parsed** `B=292 P=3 C=3835`: a greedy `sed 's/.*P=\([0-9]*\)/'`
+  captured the trailing fields too. Rewritten to emit three plain lines read
+  positionally.
+
+Also learned: **this shell collapses `\` inside heredocs**, so every escaped
+regex written through one arrives mangled -- `\1` reached Python as `\1`,
+an octal escape for chr(1). It corrupted a setup.sh patch and both watcher
+fixes. Stopped writing escaped regex through heredocs entirely.
+
+`uv sync` needs a real liveness signal because `| tail -20` withholds all
+output until the pipeline ends. Cache growth is that signal: 3.8 -> 13.3 ->
+25.1 -> 32.0 GB.
+
+Build verified: `sync rc=0`, all four deps populated, `verifiers environments:
+['oolong']`, `prime_rl + rlm_train import OK`. Volume 46GB of 100GB quota,
+container disk 193M of 30G.
+
+### 16:12Z — instrumented trainer launched
+
+`/workspace/runs/20260908T161203Z/`. Budget watchdog raised from an arbitrary
+$1.50 to **$2.10** cumulative on this pod -- sized to let a full 20-step run
+FINISH rather than to end it early, keeping the $5 account cap with ~$0.55
+margin. Stopping a working run at step 3 to save $1 would have been the wrong
+trade, and the first cap was set without doing that arithmetic.
