@@ -79,7 +79,18 @@ echo "faulthandler=$PYTHONFAULTHANDLER unbuffered=$PYTHONUNBUFFERED cuda_blockin
 # Foreground, inside a wrapper that records the status. stdbuf is belt-and-
 # braces for any non-Python child that block-buffers on its own.
 cd /workspace/prime-rl
-stdbuf -o0 -e0 uv run rl --config "$CONFIG" > >(tee -a "$LOG") 2>&1
+# prime-rl takes the config as a POSITIONAL "@ FILE" argument, not --config:
+#   usage: rl [-h] [@ FILE] [OPTIONS]
+# Passing --config is accepted by the shell and rejected by the parser as
+#   "--config Extra inputs are not permitted"
+# alongside two misleading "Field required" errors for --trainer and
+# --orchestrator, which are supplied BY the file it just refused to read.
+#
+# --no-sync because `uv run` otherwise re-resolves and reinstalls ~281
+# packages from the lockfile on every launch. That is slow, and it can
+# evict the `uv pip install -e` wiring for rlm-train/oolong that the
+# environment depends on. setup.sh has already synced.
+stdbuf -o0 -e0 uv run --no-sync rl @ "$CONFIG" > >(tee -a "$LOG") 2>&1
 STATUS=$?
 
 echo "$STATUS" > "$EXIT_FILE"
