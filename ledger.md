@@ -1234,3 +1234,53 @@ Measured link to this pod: **8 MB/s**, so copying it off costs ~33min of billed
 pod time (~$0.58). Not worth it for a 10-step smoke checkpoint whose only value
 is proving resume works -- that can be proven in place with `resume_step`
 instead, for ~$0.05.
+
+## Resume verified, and the run closed out
+
+Stopped after **step 15** (15 steady-state steps, median 350s, mean 375s,
+range 204-754) to reserve budget for the resume test, which answers a question
+worth more than four more steps of a run whose effective batch is ~1.
+
+### First attempt failed, informatively
+
+Set `resume_step = -1` under `[trainer.ckpt]` and `[orchestrator.ckpt]` --
+which looks right, because that is where `interval` and `keep_interval` live.
+The run died at startup:
+
+```
+FileExistsError: Directory 'outputs/rlm-v0-smoke' already contains checkpoints
+from a previous run. To resume the latest step of the previous run, set
+ckpt.resume_step=-1 or --ckpt.resume-step -1 via CLI.
+```
+
+It must be **top-level `[ckpt]`**. The per-component sections silently ignore
+it. Good failure mode: prime-rl refuses to overwrite rather than clobbering a
+previous run's checkpoints.
+
+### Second attempt: confirmed
+
+```
+20:23:36    INFO Resuming from step 10, cleaning future rollouts and broadcasts
+```
+
+Model, optimizer and scheduler state restored from
+`checkpoints/step_10/trainer/__0_0.distcp`. **Freeze-and-resume works.**
+`-1` resolves the latest checkpoint on disk, so no step number is hardcoded --
+which matters, given how many hardcoded values went stale tonight.
+
+### Answering the original question directly
+
+> if we do 20 steps and freeze, can we pick up at step 21?
+
+Yes. Set top-level `ckpt.resume_step = -1`. The state lives in a single
+`.distcp` file (15.8GB at step 10) containing model + optimizer + scheduler.
+
+Caveats worth carrying into V1:
+* **The pod volume is destroyed on terminate.** Use `--network-volume` (added
+  today) or the checkpoint dies with the pod. rlmwatch already refuses
+  `on_terminal: terminate` without `checkpoint_dir_is_network_volume`.
+* **Storage.** 15.8GB per checkpoint at `interval=10` = ~400GB for 250 steps.
+  Set `keep_last`.
+* **`save_weights_only`** makes checkpoints much smaller but CANNOT resume.
+
+Pod `2qysm4fs98l474` terminated at ~$3.80 of the $4.00 cap.

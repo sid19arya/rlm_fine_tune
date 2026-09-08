@@ -156,3 +156,19 @@ min_subcall = 0
 ## 0.43/sqrt(32) ~ +/-7.6 points, so a real 5-point gain is invisible. Movement
 ## on a task like this appears around 10k-30k cumulative rollouts; V0 produces
 ## 640. The deliverable is seconds per step, not the reward curve.
+
+# Resume. VERIFIED on 2026-09-08: with this set, the run logs
+#   "Resuming from step 10, cleaning future rollouts and broadcasts"
+# and continues with model, optimizer and scheduler state restored.
+#
+# It MUST be top-level [ckpt]. Setting resume_step under [trainer.ckpt] and
+# [orchestrator.ckpt] -- which looks right, since those are where interval and
+# keep_interval live -- does nothing, and the run dies at startup with
+#   FileExistsError: Directory 'outputs/rlm-v0-smoke' already contains
+#   checkpoints from a previous run.
+#
+# -1 resumes the LATEST checkpoint on disk, so no step number needs hardcoding.
+# Commented out because leaving it on makes a fresh experiment silently
+# continue an old one.
+# [ckpt]
+# resume_step = -1
