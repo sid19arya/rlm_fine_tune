@@ -43,6 +43,21 @@ DMESG_FILE="$RUN_DIR/dmesg.txt"
 # reason. /etc/rp_pod_env carries only WANDB_/HF_ vars, not PATH, so it does
 # not help here.
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+
+# UV_CACHE_DIR is not a cache pointer here -- uv 0.12 stores the project
+# ENVIRONMENT inside it (environments-v2/). Leaving it unset does not merely
+# lose cache hits: uv resolves and builds a SECOND, parallel environment under
+# ~/.cache/uv, on the 30GB container disk, and runs the trainer from that one.
+#
+# That produced a genuinely confusing failure: flash_attn was verified
+# installed and importable, and the very next launch still died with
+# ModuleNotFoundError -- because the install went to the /workspace
+# environment and the launch ran from the ~/.cache one. The traceback gives it
+# away only if you read the site-packages path in the frames.
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/uv-cache}"
+export UV_LINK_MODE="${UV_LINK_MODE:-hardlink}"
+export HF_HOME="${HF_HOME:-/workspace/hf}"
+echo "uv cache: $UV_CACHE_DIR"
 if ! command -v uv > /dev/null; then
   echo "FATAL: uv is not on PATH ($PATH)" >&2
   echo "127" > "$EXIT_FILE"
