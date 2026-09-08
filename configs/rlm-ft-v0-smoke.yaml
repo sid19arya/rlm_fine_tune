@@ -9,7 +9,7 @@
 run:
   name: rlm-v0-smoke
   regime: rl
-  wandb: ${WANDB_PATH:-rlm-runpod-1/rlm-context-management/v0-smoke}
+  wandb: ${WANDB_PATH:-rlm-runpod-1/rlm-context-management/492e1de2ed394ae68e6ec12f34d654a5}
   pod_id: ${RUNPOD_POD_ID}
 
 expect:

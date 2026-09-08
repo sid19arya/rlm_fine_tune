@@ -24,7 +24,7 @@ better". It is not the point, and at this scale it is not measurable.
 
 | | |
 |---|---|
-| W&B run | `rlm-runpod-1/rlm-context-management/v0-smoke` |
+| W&B run | `rlm-runpod-1/rlm-context-management/492e1de2ed394ae68e6ec12f34d654a5` |
 | Steps | 20 |
 | Rollouts per step | 32 |
 | Hardware | 2x NVIDIA A40 |
@@ -49,7 +49,7 @@ pip install "rlmwatch[wandb] @ git+https://github.com/sid19arya/rlm_fine_tune"
 export WANDB_API_KEY=<key>
 
 rlmwatch digest \
-  --run rlm-runpod-1/rlm-context-management/v0-smoke \
+  --run rlm-runpod-1/rlm-context-management/492e1de2ed394ae68e6ec12f34d654a5 \
   --rate 0.88 --max-usd 5 \
   --rollouts-per-step 32 --billing-lead-min 30 --json
 ```
@@ -65,7 +65,7 @@ model download take roughly 30-40 minutes. Do not report it as a failure; say
 the run has not started yet. If it persists well beyond that, say so once.
 
 **Fallback — read W&B directly** with the public API
-(`wandb.Api().run("rlm-runpod-1/rlm-context-management/v0-smoke")`), and apply §3 and §4
+(`wandb.Api().run("rlm-runpod-1/rlm-context-management/492e1de2ed394ae68e6ec12f34d654a5")`), and apply §3 and §4
 yourself. If you do this, apply them *literally*. They exist to stop a specific
 misreading.
 
