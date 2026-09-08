@@ -1169,3 +1169,68 @@ deltas (`467f6dc`). 5 tests added, each pinned to an observed failure.
 prime-rl colourises its logs, so ANSI escapes sit BETWEEN `SUCCESS` and `Step`.
 `grep "SUCCESS Step"` matches nothing and reads as "no steps have run".
 Use `grep "| Time:"`.
+
+## Ten steps — the V0 question, answered
+
+| step | time (s) | reward | seq len |
+|---|---|---|---|
+| 0 | 709.41 | 0.2500 | 6721 (warmup) |
+| 1 | 277.19 | 0.1250 | 6514 |
+| 2 | 204.05 | 0.3750 | 6053 |
+| 3 | 287.16 | 0.6250 | 4044 |
+| 4 | 369.25 | 0.6250 | 7158 |
+| 5 | 369.46 | 0.3750 | 6896 |
+| 6 | 483.38 | 0.5000 | 6632 |
+| 7 | 208.38 | 0.2500 | 6182 |
+| 8 | 418.89 | 0.3750 | 5307 |
+| 9 | 341.48 | 0.2500 | 6188 |
+| 10 | 312.57 | 0.5000 | 5798 |
+
+**Steady state (1-10): median 327s, mean 327s, range 204-483.** Median and mean
+agreeing says the distribution is not outlier-skewed.
+
+**250 steps ~= 22.7h ~= $24** on 2x RTX A6000 @ $1.06/hr. The cost question is
+answered: affordable.
+
+### Peak memory plateaus; it is not a leak
+
+```
+step 0-1  40.95    step 5-6  43.10
+step 2    42.14    step 7    43.52
+step 3-4  43.43    step 8    42.55   <- down
+```
+
+Rises over the first three steps, then stable ~43.5 GB. My earlier "creeping
+toward OOM, may die at step 10-15" was over-read from a five-point window.
+Still **tight**: ~0.9GB headroom on 44.43 GiB, so an unusually long sequence
+could OOM. A real constraint, not a progressive one.
+
+### The actual blocker is sample efficiency
+
+`effective_batch_size/all` alternates **0.5 / 1.0** against 8 rollouts, with
+`errored_rollouts` and `empty_rollouts` both 0 and a persistent
+`zero_advantage=4/8`. Each step trains on roughly ONE usable sample.
+
+Budget does not fix this. Raising effective batch is the precondition for V1,
+not step time and not cost.
+
+### Three trends I called too early
+
+Sequence length "monotonic -40%" (reversed at step 4), step time "+50s/step"
+(reversed at step 7), peak memory "creeping to OOM" (plateaued by step 8). All
+three were 4-6 point windows. I applied HERMES.md's noise-band discipline to
+the reward, because the document says to, and not to metrics I noticed myself.
+The rule is about n, not about which metric.
+
+### Checkpoint
+
+`checkpoints/step_10/trainer/__0_0.distcp` = **15.8 GB**, one file, model plus
+optimizer state. Note LoRA training still checkpoints the FULL model: 15.8GB
+for 30M trainable params. At `interval=10`, a 250-step run writes 25 of these
+= ~400GB, which overflows a 200GB volume around step 120 unless `keep_last`
+is set.
+
+Measured link to this pod: **8 MB/s**, so copying it off costs ~33min of billed
+pod time (~$0.58). Not worth it for a 10-step smoke checkpoint whose only value
+is proving resume works -- that can be proven in place with `resume_step`
+instead, for ~$0.05.
