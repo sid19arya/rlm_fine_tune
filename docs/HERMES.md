@@ -27,10 +27,28 @@ better". It is not the point, and at this scale it is not measurable.
 | W&B project | `rlm-runpod-1/rlm-context-management` (resolve the run -- see below) |
 | Steps | 20 |
 | Rollouts per step | 32 |
-| Hardware | 2x NVIDIA A40 |
-| Rate | ~$0.98/hr (measured; the $0.88 list price is not what is billed) |
+| Hardware | 2x NVIDIA A40 **or** RTX A6000 (whichever had stock; check the pod) |
+| Rate | ~$0.98/hr on A40, ~$1.06 on A6000 (measured; the $0.88 list price is not billed) |
 | Budget cap | **$5.00** (enforced elsewhere; you only report) |
-| Expected duration | ~1.5-2.5h including setup |
+| Expected duration | ~1.5-2.5h for all 20 steps -- **but see the budget note below** |
+
+
+### Budget note -- read this before reporting anything as wrong
+
+**This run will almost certainly be stopped before step 20, on purpose.**
+
+Roughly $3.23 of the $5.00 cap was spent on earlier attempts, so under $1.80
+remains -- about 90 minutes of pod time. A full 20-step run costs more than
+that. The deliverable is **seconds per step**, which is available from the
+first two or three steps; the remaining steps are not needed for it.
+
+So: **an early stop is the expected outcome, not a failure.** Do not report a
+run that ends at step 3 as crashed, stalled or truncated, and do not escalate
+it. Report the seconds-per-step figure and say the run was stopped at the
+budget line as planned.
+
+A run that stops *without* having logged at least one step IS worth reporting.
+That distinction is the whole signal here.
 
 ---
 
