@@ -297,5 +297,5 @@ class TestHermesBriefing:
 
     def test_the_briefing_uses_the_standalone_invocation(self):
         """configs/ is not in the wheel, so -c would fail after a pip install."""
-        assert "--run rlm-runpod-1/rlm-context-management/v0-smoke" in self.text
+        assert "--run rlm-runpod-1/rlm-context-management/" in self.text
         assert "-c configs/" not in self.text

@@ -61,7 +61,7 @@ class FakeHardware:
         self.nccl_timeout_seen = timeout_s
         return self._nccl
 
-    def free_disk_gb(self, path):
+    def free_disk_gb(self, path, quota_gb=None):
         return self._free_disk
 
 
@@ -397,3 +397,91 @@ class TestGate:
         result = gate(make_sctx(hardware=FakeHardware(gpus=[])))
         assert "FAILED" in result.summary()
         assert "\n" not in result.summary()
+
+
+class TestVolumeQuota:
+    """statvfs lies on a network-backed volume.
+
+    Observed live on a RunPod 100GB volume backed by MooseFS: df reported 756T
+    total and 191T available while the volume held 91G of its 100G quota and
+    writes were already failing with "Disk quota exceeded". The gate passed
+    that disk as healthy minutes before the run died on it.
+    """
+
+    def hardware(self, statvfs_free_gb: float, du_bytes: int):
+        from rlmwatch.probes.startup import SystemHardware
+
+        hw = SystemHardware(runner=lambda cmd, timeout=30.0: f"{du_bytes}\t/workspace")
+        hw._statvfs_free = statvfs_free_gb
+        import shutil as _shutil
+
+        class FakeUsage:
+            free = int(statvfs_free_gb * 1024**3)
+
+        hw._orig = _shutil.disk_usage
+        return hw, FakeUsage
+
+    def test_without_a_quota_it_trusts_statvfs(self, monkeypatch):
+        from rlmwatch.probes import startup
+
+        monkeypatch.setattr(startup.shutil, "disk_usage",
+                            lambda p: type("U", (), {"free": 191 * 1024**4})())
+        hw = startup.SystemHardware(runner=lambda cmd, timeout=30.0: "")
+        assert hw.free_disk_gb("/workspace") > 100_000  # terabytes
+
+    def test_with_a_quota_it_reports_the_real_headroom(self, monkeypatch):
+        """91G used of a 100G quota is 9G free, not 191T."""
+        from rlmwatch.probes import startup
+
+        monkeypatch.setattr(startup.shutil, "disk_usage",
+                            lambda p: type("U", (), {"free": 191 * 1024**4})())
+        used = 91 * 1024**3
+        hw = startup.SystemHardware(runner=lambda cmd, timeout=30.0: f"{used}\t/workspace")
+        free = hw.free_disk_gb("/workspace", quota_gb=100)
+        assert free == pytest.approx(9.0, abs=0.5)
+
+    def test_a_full_quota_reports_zero_not_negative(self, monkeypatch):
+        from rlmwatch.probes import startup
+
+        monkeypatch.setattr(startup.shutil, "disk_usage",
+                            lambda p: type("U", (), {"free": 191 * 1024**4})())
+        used = 105 * 1024**3
+        hw = startup.SystemHardware(runner=lambda cmd, timeout=30.0: f"{used}\t/workspace")
+        assert hw.free_disk_gb("/workspace", quota_gb=100) == 0.0
+
+    def test_an_unreadable_du_falls_back_to_statvfs(self, monkeypatch):
+        from rlmwatch.probes import startup
+
+        monkeypatch.setattr(startup.shutil, "disk_usage",
+                            lambda p: type("U", (), {"free": 50 * 1024**3})())
+        hw = startup.SystemHardware(runner=lambda cmd, timeout=30.0: "")
+        assert hw.free_disk_gb("/workspace", quota_gb=100) == pytest.approx(50.0)
+
+    def test_the_probe_fails_a_quota_full_volume(self, make_sctx, config_dict, tmp_path):
+        """The gate must now catch what it previously passed."""
+        from rlmwatch.config import from_dict
+        from rlmwatch.probes.startup import DiskSpaceProbe
+
+        class QuotaFull:
+            def gpus(self):
+                return []
+
+            def torch_device_count(self):
+                return 2
+
+            def xid_errors(self):
+                return []
+
+            def nccl_all_reduce(self, timeout_s):
+                return True
+
+            def free_disk_gb(self, path, quota_gb=None):
+                return 9.0 if quota_gb else 191_000.0
+
+        config_dict["expect"] = {**config_dict["expect"], "min_disk_gb": 60,
+                                 "volume_quota_gb": 100}
+        sctx = make_sctx(hardware=QuotaFull())
+        sctx.ctx.cfg = from_dict(config_dict)
+        verdict = DiskSpaceProbe().inspect(sctx)
+        assert verdict.status == "fail"
+        assert verdict.evidence["free_gb"] == 9.0

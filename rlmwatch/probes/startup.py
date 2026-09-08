@@ -54,7 +54,7 @@ class HardwareBackend(Protocol):
     def torch_device_count(self) -> int | None: ...
     def xid_errors(self) -> list[str]: ...
     def nccl_all_reduce(self, timeout_s: float) -> bool: ...
-    def free_disk_gb(self, path: str) -> float | None: ...
+    def free_disk_gb(self, path: str, quota_gb: float | None = None) -> float | None: ...
 
 
 class SystemHardware:
@@ -149,12 +149,44 @@ class SystemHardware:
             return False
         return "nccl-ok" in (result.stdout or "")
 
-    def free_disk_gb(self, path: str) -> float | None:
+    def free_disk_gb(self, path: str, quota_gb: float | None = None) -> float | None:
+        """Free space at `path`, honouring a volume quota when one is given.
+
+        `shutil.disk_usage` reads statvfs, which on a network-backed volume
+        reports the **cluster's** capacity rather than the share we are allowed
+        to use. Observed on a RunPod 100GB volume backed by MooseFS:
+
+            df:     756T total, 191T available
+            actual: 91G of a 100G quota, writes already failing with
+                    "Disk quota exceeded"
+
+        The gate passed that disk as healthy while the run was minutes from
+        dying on it -- the same shape as a budget cap that reads $0.00. So when
+        `quota_gb` is configured, free space is computed as quota minus actual
+        usage, and statvfs is used only as a ceiling for the local case.
+        """
         try:
             usage = shutil.disk_usage(path)
         except OSError:
             return None
-        return usage.free / 1024**3
+        statvfs_free = usage.free / 1024**3
+        if not quota_gb:
+            return statvfs_free
+        used = self._used_gb(path)
+        if used is None:
+            return statvfs_free
+        # The smaller of the two: a quota can bind before the filesystem does,
+        # and on a local disk the filesystem can bind before the quota.
+        return min(statvfs_free, max(0.0, quota_gb - used))
+
+    def _used_gb(self, path: str) -> float | None:
+        """Actual bytes used under `path`. `du` is slow on a network mount but
+        it is the only number that reflects a quota."""
+        out = self._run(["du", "-sb", path], timeout=120.0)
+        try:
+            return int(out.split()[0]) / 1024**3
+        except (ValueError, IndexError):
+            return None
 
 
 @dataclass
@@ -325,7 +357,7 @@ class DiskSpaceProbe(StartupProbe):
 
     def inspect(self, sctx: StartupContext) -> Verdict:
         expect = sctx.ctx.cfg.expect
-        free = sctx.hardware.free_disk_gb(expect.checkpoint_dir)
+        free = sctx.hardware.free_disk_gb(expect.checkpoint_dir, expect.volume_quota_gb)
         if free is None:
             return self.fail(
                 f"checkpoint dir {expect.checkpoint_dir} does not exist or is not "

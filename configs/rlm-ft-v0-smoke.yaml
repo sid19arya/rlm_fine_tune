@@ -23,6 +23,9 @@ expect:
   # Qwen3-8B is ~16GB and HF_HOME is on the volume disk. 60GB leaves room for
   # the model, the adapter checkpoints and the trajectory logs.
   min_disk_gb: 60
+  # The provisioned volume size. statvfs reports the MooseFS cluster (191T
+  # "available"), so without this the probe cannot see a full 100GB volume.
+  volume_quota_gb: 100
   checkpoint_dir: /workspace/outputs
 
 startup:

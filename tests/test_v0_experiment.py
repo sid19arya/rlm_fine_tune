@@ -237,19 +237,30 @@ class TestWandbIdentity:
     Hermes address a run that does not exist and report `unknown` all run."""
 
     @property
-    def path(self) -> str:
-        return (f"{provision.WANDB_ENTITY}/{provision.WANDB_PROJECT}/"
-                f"{provision.DEFAULT_RUN_ID}")
+    def prefix(self) -> str:
+        return f"{provision.WANDB_ENTITY}/{provision.WANDB_PROJECT}/"
 
-    def test_the_monitor_config_points_at_the_same_run(self):
-        text = (EXPERIMENT_DIR.parent.parent / "configs"
-                / "rlm-ft-v0-smoke.yaml").read_text(encoding="utf-8")
-        assert self.path in text
+    def _run_paths(self, text: str) -> set[str]:
+        import re
+        return set(re.findall(re.escape(self.prefix) + r"([A-Za-z0-9_-]+)", text))
 
-    def test_the_hermes_briefing_points_at_the_same_run(self):
-        text = (EXPERIMENT_DIR.parent.parent / "docs"
-                / "HERMES.md").read_text(encoding="utf-8")
-        assert self.path in text
+    def test_the_config_and_briefing_name_the_same_run(self):
+        """The run id is DISCOVERED, not pinned.
+
+        WANDB_RUN_ID was set to make the path predictable and prime-rl ignored
+        it: it uses wandb "shared" mode, which generates its own id, so
+        v0-smoke survived only as the display name while the API path became a
+        UUID. What still has to hold is that the monitor config and the Hermes
+        briefing name the SAME run -- if they drift, one of the two observers
+        polls a 404 for the whole run and reports itself blind.
+        """
+        root = EXPERIMENT_DIR.parent.parent
+        cfg = self._run_paths((root / "configs" / "rlm-ft-v0-smoke.yaml")
+                              .read_text(encoding="utf-8"))
+        brief = self._run_paths((root / "docs" / "HERMES.md").read_text(encoding="utf-8"))
+        assert cfg, "no run path in the monitor config"
+        assert brief, "no run path in the Hermes briefing"
+        assert cfg == brief, f"config names {cfg}, briefing names {brief}"
 
     def test_smoke_toml_declares_the_same_project(self):
         try:

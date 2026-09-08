@@ -74,6 +74,11 @@ class Expect:
     gpu_count: int = 1
     min_free_vram_gb: float = 0.0
     min_disk_gb: float = 0.0
+    # Size of the provisioned volume, if the checkpoint dir is on one.
+    # Without it the disk probe trusts statvfs, which on a network-backed
+    # volume reports the whole cluster -- 191T "available" on a 100GB
+    # volume that was already full and failing writes.
+    volume_quota_gb: float = 0.0
     checkpoint_dir: str = "/workspace/ckpt"
 
     def validate(self) -> None:

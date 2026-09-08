@@ -221,7 +221,7 @@ class TestDiskFull:
             def nccl_all_reduce(self, timeout_s):
                 return True
 
-            def free_disk_gb(self, path):
+            def free_disk_gb(self, path, quota_gb=None):
                 return 0.4
 
         from rlmwatch.probes.base import Context
@@ -253,7 +253,7 @@ class TestDiskFull:
             def nccl_all_reduce(self, timeout_s):
                 return True
 
-            def free_disk_gb(self, path):
+            def free_disk_gb(self, path, quota_gb=None):
                 return 0.0
 
         from rlmwatch.probes.base import Context
@@ -554,7 +554,7 @@ class _HealthyHardware:
     def nccl_all_reduce(self, timeout_s):
         return True
 
-    def free_disk_gb(self, path):
+    def free_disk_gb(self, path, quota_gb=None):
         return 200.0
 
 
