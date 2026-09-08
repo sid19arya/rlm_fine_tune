@@ -63,10 +63,23 @@ free_gb=$(df -BG --output=avail /workspace | tail -1 | tr -dc '0-9')
 # The container disk is 30GB. Qwen3-8B alone is ~16GB, and HF's default cache
 # is on the container disk. Every "no space left on device" three hours in
 # traces back to skipping this line.
-log "pinning the HF cache to the volume disk"
+log "pinning the HF and uv caches to the volume disk"
 export HF_HOME=/workspace/hf
 mkdir -p "$HF_HOME"
 grep -q 'HF_HOME=/workspace/hf' ~/.bashrc || echo 'export HF_HOME=/workspace/hf' >> ~/.bashrc
+
+# uv's cache defaults to ~/.cache/uv, which is on the 30GB container disk.
+# prime-rl pulls torch, vLLM and ~300 other packages; the cache alone reached
+# 15GB of a 30GB disk on this pod, with the OS already using 13GB. Left on the
+# container disk this is a "no space left on device" three hours in -- the same
+# failure HF_HOME is pinned to avoid, via a different cache.
+export UV_CACHE_DIR=/workspace/uv-cache
+mkdir -p "$UV_CACHE_DIR"
+grep -q 'UV_CACHE_DIR=/workspace/uv-cache' ~/.bashrc   || echo 'export UV_CACHE_DIR=/workspace/uv-cache' >> ~/.bashrc
+# Same filesystem as the venvs, so uv can hardlink instead of full-copying --
+# which also removes the "Failed to hardlink files" warning and the doubled
+# disk write it implies.
+export UV_LINK_MODE=hardlink
 
 : "${HF_TOKEN:?HF_TOKEN is not set. It is needed to push the adapter before the \
 volume disk is destroyed on terminate. Set it now, not at the end.}"

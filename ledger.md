@@ -343,3 +343,68 @@ uptime 30.2 min -> spend $0.49 of $5.00
 
 Six tests cover it, including that unparseable input yields 0.0 rather than an
 exception.
+
+### 00:20-00:35Z — prime-rl: three layered failures
+
+`setup.sh` deliberately leaves prime-rl's install to a human, since its README
+changes often. Doing it turned up three problems in sequence.
+
+**1. Submodules were never initialised.** A plain `git clone` leaves `deps/`
+empty, and `uv sync` died with
+
+```
+× Failed to build `prime-pydantic-config @ file:///workspace/prime-rl/deps/pydantic-config`
+╰─▶ ... does not appear to be a Python project
+```
+
+**2. Four of the five submodules use `git@github.com:` SSH URLs.** There is no
+GitHub key on the pod and there should not be one. A *local*
+`url.<base>.insteadOf` did not reach the submodule clone subprocesses — they
+still tried SSH and died on host-key verification. Fixed with a `--global`
+rewrite plus editing `.gitmodules` directly and `git submodule sync`.
+
+**3. `--depth 1` left the working trees empty.** `.git` present, correct commit
+checked out, every file staged as deleted. Restored with
+
+```
+git submodule foreach --recursive 'git checkout -- . || git reset --hard -q HEAD'
+```
+
+Then `uv sync --all-extras` succeeded: 303 packages, flash-attn-4 built from
+source, `SYNC_EXIT=0`.
+
+### 00:31Z — the monitor was lying, and I wrote the lie
+
+`PROBE-FAIL: pod unreachable` fired three times against a pod that was fine
+every time. Cause: `ps aux | grep -c` **exits 1 when the count is zero**, so
+"no python processes running" was reported as "pod unreachable".
+
+This is the same defect class the whole library exists to catch — a monitor
+reporting a confident wrong thing — and it was in the monitoring I wrote for
+this session. Fixed with `|| true`, and the two states are now distinguished:
+`UNREACHABLE` only when ssh returns nothing at all, `IDLE` when it returns real
+numbers showing no activity.
+
+The rebuilt monitor immediately proved useful:
+
+```
+MOVING net=51104KB/s disk=103601KB/s gpu=0% procs=1
+```
+
+Throughput, not log-line presence. During the model download I had only a log
+grep, which cannot distinguish a stalled transfer from a quiet one.
+
+### 00:33Z — container disk at 50%, uv cache in the wrong place
+
+```
+overlay      30G   15G   16G  50% /
+/root/.cache 15G                     <- uv cache, on the CONTAINER disk
+```
+
+`HF_HOME` was pinned to `/workspace`; `UV_CACHE_DIR` was not. Same "no space
+left on device" failure, different cache — prime-rl pulls torch, vLLM and ~300
+other packages. It fitted this time with 16G to spare, but only just.
+
+`setup.sh` now pins `UV_CACHE_DIR=/workspace/uv-cache` and sets
+`UV_LINK_MODE=hardlink`, which also removes the "Failed to hardlink files,
+falling back to full copy" warning and the doubled disk write behind it.
