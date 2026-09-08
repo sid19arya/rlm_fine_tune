@@ -47,7 +47,7 @@ class TestProvision:
     def test_the_spec_matches_the_v0_hardware(self):
         assert provision.POD_SPEC["gpuCount"] == 2
         assert provision.POD_SPEC["containerDiskInGb"] == 30
-        assert provision.POD_SPEC["volumeInGb"] == 100
+        assert provision.POD_SPEC["volumeInGb"] == 200  # 100GB yields ~75GB usable; the run needs ~85-90GB
         assert provision.POD_SPEC["volumeMountPath"] == "/workspace"
 
     def test_a6000_is_the_documented_fallback_for_a40(self):
@@ -255,12 +255,29 @@ class TestWandbIdentity:
         polls a 404 for the whole run and reports itself blind.
         """
         root = EXPERIMENT_DIR.parent.parent
-        cfg = self._run_paths((root / "configs" / "rlm-ft-v0-smoke.yaml")
-                              .read_text(encoding="utf-8"))
-        brief = self._run_paths((root / "docs" / "HERMES.md").read_text(encoding="utf-8"))
-        assert cfg, "no run path in the monitor config"
-        assert brief, "no run path in the Hermes briefing"
-        assert cfg == brief, f"config names {cfg}, briefing names {brief}"
+        cfg_text = (root / "configs" / "rlm-ft-v0-smoke.yaml").read_text(encoding="utf-8")
+        brief_text = (root / "docs" / "HERMES.md").read_text(encoding="utf-8")
+
+        # The invariant has changed, and the docstring above explains why: an id
+        # cannot be pinned at all, so requiring both to name the SAME id was
+        # requiring both to be wrong together. Three ids were generated across
+        # relaunches on 2026-09-08 and every one written down went stale.
+        #
+        # What must hold now is that NEITHER hardcodes an id.
+        assert not self._run_paths(cfg_text), (
+            "the monitor config hardcodes a wandb run id. It must interpolate "
+            "${WANDB_PATH} so an unset value fails loudly instead of silently "
+            "watching a dead run."
+        )
+        assert not self._run_paths(brief_text), (
+            "the Hermes briefing hardcodes a wandb run id. It must resolve the "
+            "newest run in the project at poll time."
+        )
+        # ...and that the briefing actually tells the agent how to resolve one.
+        assert "order='-created_at'" in brief_text or 'order="-created_at"' in brief_text, (
+            "the briefing removed the hardcoded id but does not explain how to "
+            "find the live run, which leaves the agent with no run at all."
+        )
 
     def test_smoke_toml_declares_the_same_project(self):
         try:

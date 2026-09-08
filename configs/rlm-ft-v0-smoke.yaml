@@ -9,7 +9,12 @@
 run:
   name: rlm-v0-smoke
   regime: rl
-  wandb: ${WANDB_PATH:-rlm-runpod-1/rlm-context-management/492e1de2ed394ae68e6ec12f34d654a5}
+  # No default. prime-rl uses wandb shared mode and mints a NEW run id every
+  # launch, so any id baked in here is stale the moment training restarts --
+  # and a sentinel watching a dead run reports itself blind while holding the
+  # kill switch. Failing loudly on an unset WANDB_PATH is the safe direction.
+  # Read the id out of the launch log and export it.
+  wandb: ${WANDB_PATH}
   pod_id: ${RUNPOD_POD_ID}
 
 expect:

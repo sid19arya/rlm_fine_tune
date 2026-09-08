@@ -136,6 +136,11 @@ def test_v0_train_hooks_demo_runs_end_to_end(monkeypatch, tmp_path):
 
     root = Path(__file__).resolve().parent.parent
     monkeypatch.setenv("RUNPOD_POD_ID", "pod-demo")
+    # WANDB_PATH has no default in the config any more, deliberately: prime-rl
+    # mints a new run id every launch, so a baked-in default meant the sentinel
+    # could silently watch a dead run while holding the kill switch. It now
+    # fails loudly when unset, which this demo has to satisfy like any caller.
+    monkeypatch.setenv("WANDB_PATH", "rlm-runpod-1/rlm-context-management/demo-run")
     monkeypatch.chdir(root)
 
     spec = importlib.util.spec_from_file_location(

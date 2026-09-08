@@ -118,7 +118,12 @@ def check_auth(client: httpx.Client) -> int:
     return len(pods) if isinstance(pods, list) else 0
 
 
-def create_pod(client: httpx.Client, name: str, env: dict[str, str]) -> dict:
+def create_pod(
+    client: httpx.Client,
+    name: str,
+    env: dict[str, str],
+    network_volume_id: str | None = None,
+) -> dict:
     """Create the pod, letting RunPod pick from the preferred GPU list.
 
     `gpuTypeIds` is a list the API treats as "any of these", so stock-out
@@ -132,6 +137,26 @@ def create_pod(client: httpx.Client, name: str, env: dict[str, str]) -> dict:
         "gpuTypeIds": list(GPU_PREFERENCES),
         "env": env,
     }
+    if network_volume_id:
+        # Opt-in, because it is a genuine trade rather than a free improvement.
+        #
+        # WITHOUT it: the pod volume is destroyed on terminate. prime-rl writes
+        # a full checkpoint (sharded weights AND optimizer state) every 10 steps
+        # and can resume from it via resume_step -- but only if the disk still
+        # exists. Terminating a pod mid-experiment throws away the trained
+        # state, which is why rlmwatch refuses `on_terminal: terminate` unless
+        # failsafe.checkpoint_dir_is_network_volume is set.
+        #
+        # WITH it: checkpoints survive terminate, so a run can be frozen at
+        # step 20 and resumed at 21 on a different pod. The cost is that a
+        # network volume pins the pod to one data centre, and pinning is
+        # exactly what makes a 2xA40 request fail on stock -- which happened
+        # repeatedly on 2026-09-08, twice costing a ~4h wait for capacity.
+        #
+        # Rule of thumb: omit it for a smoke test you are willing to lose,
+        # supply it for any run whose weights you intend to keep.
+        payload["networkVolumeId"] = network_volume_id
+        payload.pop("volumeInGb", None)
     response = client.post("/pods", json=payload)
     if response.status_code >= 400:
         raise ProvisionError(
@@ -206,6 +231,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ssh-key", default="~/.ssh/runpod_rlm.pub",
                         help="public key injected as PUBLIC_KEY; RunPod writes it "
                              "to authorized_keys at container start")
+    parser.add_argument(
+        "--network-volume", default=None, metavar="ID",
+        help="attach an existing RunPod network volume instead of a pod volume. "
+             "Checkpoints then SURVIVE terminate, so a run can be frozen and "
+             "resumed on another pod -- at the cost of pinning placement to one "
+             "data centre, which makes stock-outs far more likely.",
+    )
     parser.add_argument("--allow-existing", action="store_true",
                         help="provision even though other pods are already billing")
     parser.add_argument("--dry-run", action="store_true",
@@ -335,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  requesting {POD_SPEC['gpuCount']}x from "
               f"{' or '.join(GPU_PREFERENCES)}, ~${estimate:.2f}/hr")
 
-        pod = create_pod(client, args.name, env)
+        pod = create_pod(client, args.name, env, args.network_volume)
         pod_id = pod.get("id")
         if not pod_id:
             raise ProvisionError(f"pod created but no id returned: {pod}")
