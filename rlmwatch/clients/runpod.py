@@ -185,10 +185,21 @@ class RunPodClient:
         """Pod state, GPU type/count and uptime."""
         data = self._json("GET", f"/v1/pods/{pod_id}")
         machine = data.get("machine") or {}
+        state = str(data.get("desiredStatus") or data.get("status") or "UNKNOWN").upper()
         uptime = data.get("uptimeSeconds")
         if uptime is None:
             uptime = (data.get("runtime") or {}).get("uptimeInSeconds") or None
-        if not uptime:
+        if not uptime and state != RUNNING:
+            # A stopped pod is not accruing GPU cost, so its "uptime" must stop
+            # growing. Without this branch the createdAt fallback below keeps
+            # counting wall-clock forever: an EXITED pod created 8 hours ago
+            # reports 8h of uptime and the cost probe bills it at the full GPU
+            # rate. Observed on pqh54v1mcyare2, EXITED, still reporting a
+            # rising uptime against $0.98/hr. The error is fail-safe (spend is
+            # over-reported, so the cap trips early rather than late) but it
+            # would strand a budget on a pod that stopped spending hours ago.
+            uptime = 0.0
+        elif not uptime:
             # Neither field is populated on a live pod -- observed on a running
             # 2x A40: `uptimeSeconds` absent and `runtime` null. Falling back to
             # 0 would be catastrophic rather than merely wrong: every cost probe
@@ -205,7 +216,7 @@ class RunPodClient:
         )
         return PodStatus(
             id=data.get("id", pod_id),
-            state=str(data.get("desiredStatus") or data.get("status") or "UNKNOWN").upper(),
+            state=state,
             gpu_type=str(gpu_type),
             gpu_count=int(data.get("gpuCount") or 0),
             uptime_s=float(uptime),

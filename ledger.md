@@ -803,3 +803,45 @@ failing command, not to abort on it.
 
 Cost to re-run with this in place: **~15 minutes, ~$0.25** of the $2.64
 remaining under the $5 cap.
+
+### 05:55Z — the old pod is unrecoverable; A40 stock is gone account-wide
+
+Five `start` attempts, 45s apart, all identical:
+
+```
+500 {"error":"start pod: There are not enough free GPUs on the host machine..."}
+```
+
+Provisioning a replacement then failed too:
+
+```
+500 {"error":"create pod: There are no instances currently available"}
+```
+
+Not a host quirk -- a shortage. RunPod REST v1 has no GPU catalogue endpoint,
+but the GraphQL API does, and it is a free read:
+
+```
+secure    : A40 and A6000 ABSENT. Cheapest 2x >=40GB is L40S @ $2.18/hr
+community : L40S 2x @ $1.58/hr, RTX PRO 5000 @ $1.64, A100 SXM @ $2.78
+```
+
+The pod we were using at $0.88-0.98/hr is not purchasable right now at any
+tier. **Worth adding to the provisioner: query GraphQL stock before attempting
+creation, so a stock-out is a pre-flight message rather than a 500.**
+
+Terminated `pqh54v1mcyare2` (204, 0 pods remain) -- the guard in provision.py
+correctly refused to create a second pod while a stopped one was still billing
+storage, and the stopped pod's volume was unreachable anyway.
+
+### 05:58Z — third bug in the cost path, found by reading the pod list
+
+`createdAt`-based uptime (the fix that made the budget cap work at all) had no
+state check, so an EXITED pod kept accruing wall-clock: `pqh54v1mcyare2`
+reported a rising uptime against $0.98/hr while stopped. Fail-safe in
+direction -- spend is over-reported, so the cap trips early -- but it would
+strand a budget on a pod that stopped spending hours ago. Now returns 0 uptime
+for any non-RUNNING pod. 348 tests pass.
+
+That is three defects in one small function, all found by running it against
+live infrastructure and none reachable with fakes.
