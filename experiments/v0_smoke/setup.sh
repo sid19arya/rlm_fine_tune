@@ -80,6 +80,14 @@ grep -q 'UV_CACHE_DIR=/workspace/uv-cache' ~/.bashrc   || echo 'export UV_CACHE_
 # which also removes the "Failed to hardlink files" warning and the doubled
 # disk write it implies.
 export UV_LINK_MODE=hardlink
+# ...and persist these into the pod env file, not just ~/.bashrc. A detached
+# launcher (setsid, nohup, cron) never sources ~/.bashrc, so it inherits
+# UV_CACHE_DIR=unset and puts a ~15GB cache back on the 30GB container disk --
+# the exact disk-exhaustion failure this pinning exists to prevent, arriving
+# through a different door. Same class of bug as uv not being on PATH there.
+for kv in "UV_CACHE_DIR=$UV_CACHE_DIR" "UV_LINK_MODE=$UV_LINK_MODE" "HF_HOME=$HF_HOME"; do
+  grep -q "^export ${kv%%=*}=" /etc/rp_pod_env 2>/dev/null || echo "export $kv" >> /etc/rp_pod_env
+done
 
 : "${HF_TOKEN:?HF_TOKEN is not set. It is needed to push the adapter before the \
 volume disk is destroyed on terminate. Set it now, not at the end.}"
@@ -112,16 +120,67 @@ uv venv --python 3.12 --allow-existing
 source .venv/bin/activate
 uv pip install -e .
 
-log "cloning prime-rl"
+# PIN prime-rl, do not float. HEAD renamed the env config key to `source`
+# (d135ed4c9, 2026-07-29) and rejects rlm's config with 7 validation errors.
+# 083127fe (2026-05-27) is the commit whose schema rlm's harness targets.
+#
+# How that was found, because two guesses from reading rename commit messages
+# were wrong by weeks: rlm/training/configs/ has exactly one commit in its
+# entire history (de762b9, 2026-05-24), which dates the harness and gives a
+# three-day window. Date the consumer; do not read the producer's changelog.
+#
+# An earlier version of this script deferred the whole prime-rl install to its
+# README, so this pin lived only in a shell history and was silently lost on
+# the next pod -- which cost a full session.
+PRIME_SHA="${PRIME_SHA:-083127fe}"
+log "cloning prime-rl at pinned $PRIME_SHA"
 [ -d /workspace/prime-rl ] || git clone https://github.com/PrimeIntellect-ai/prime-rl \
   /workspace/prime-rl
-cat <<'NOTE'
+cd /workspace/prime-rl
+git fetch --all --tags --quiet
+git checkout --quiet "$PRIME_SHA" || die "could not check out prime-rl $PRIME_SHA"
+echo "  prime-rl at $(git log --oneline -1)"
 
-prime-rl installs per its own README, which changes more often than this script
-does. Follow it now, in this same venv, then re-run this script -- it is
-idempotent and will skip everything already done.
+log "initialising prime-rl submodules"
+# Two separate traps here.
+#
+# 1. Several submodules are declared with git@github.com: SSH URLs. The pod has
+#    no GitHub key, so `submodule update` fails on them and leaves deps/ empty.
+#    That surfaces much later, and much less clearly, as:
+#      Failed to build `prime-pydantic-config` ... does not appear to be a
+#      Python project, as neither pyproject.toml nor setup.py are present
+#    These repos are all public over https.
+#
+# 2. At this pinned commit the submodule set includes configs/private ->
+#    research-configs, which is a PRIVATE repo. git aborts the ENTIRE
+#    `submodule update` when it cannot clone it ("Failed to clone
+#    'configs/private' a second time, aborting") even though the four deps we
+#    need cloned fine moments earlier. Scoping the update to `-- deps` skips it.
+#    Nothing in this experiment reads configs/private.
+sed -i 's#git@github.com:#https://github.com/#' .gitmodules
+git submodule sync --quiet
+git submodule update --init --recursive --depth 1 -- deps || die "submodule init failed"
+for d in deps/*/; do
+  [ -z "$(ls -A "$d" 2>/dev/null)" ] && die "submodule $d is empty after init"
+done
+echo "  deps ok: $(ls -d deps/*/ | tr '
+' ' ')"
 
-NOTE
+log "building prime-rl (torch, vLLM, ~300 packages -- the slow step)"
+uv sync || die "uv sync failed"
+
+log "wiring rlm into the prime-rl environment"
+uv pip install -e /workspace/rlm/training
+uv pip install -e /workspace/rlm/training/environments/oolong
+uv run python - <<'CHECK'
+from importlib.metadata import entry_points
+envs = [e.name for e in entry_points(group="verifiers.environments")]
+assert "oolong" in envs, f"oolong not registered as a verifiers environment: {envs}"
+import prime_rl, rlm_train  # noqa: F401
+print(f"  verifiers environments: {envs}")
+print("  prime_rl + rlm_train import OK")
+CHECK
+cd - > /dev/null
 
 log "installing the monitor and its extras"
 # This repo has to be ON the pod, not just referenced. Cloning is the
