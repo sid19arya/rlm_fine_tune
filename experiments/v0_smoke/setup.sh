@@ -221,11 +221,12 @@ for mod in chains:
     try:
         importlib.import_module(mod)
     except Exception as exc:
-        failed.append(f"{mod}: {type(exc).__name__}: {exc}")
+        failed.append(mod + ': ' + type(exc).__name__ + ': ' + str(exc))
 if failed:
-    raise SystemExit("  entrypoint imports FAILED:
-    " + "
-    ".join(failed))
+    print('  entrypoint imports FAILED:')
+    for item in failed:
+        print('    ' + item)
+    raise SystemExit(1)
 
 print(f"  verifiers environments: {envs}")
 print(f"  entrypoint chains import OK ({len(chains)} checked)")
