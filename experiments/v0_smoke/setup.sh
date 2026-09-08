@@ -186,13 +186,49 @@ log "wiring rlm into the prime-rl environment"
 # so wiring first and syncing second silently un-wires oolong.
 uv pip install -e /workspace/rlm/training
 uv pip install -e /workspace/rlm/training/environments/oolong
+# orjson is a verifiers dependency that the lockfile carries but that has gone
+# missing after re-resolution with --extra flash-attn. Cheap to assert.
+uv pip install orjson
 uv run python - <<'CHECK'
+# Import the ACTUAL entrypoint chains, not just the top-level package.
+#
+# `import prime_rl` succeeds in an environment that cannot run anything: it
+# touches none of the heavy submodules. Two separate missing dependencies got
+# through a shallow check like that and only surfaced minutes into billed runs:
+#
+#   flash_attn  -- trainer.model -> trainer.lora -> models -> glm_moe_dsa
+#                  -> sparse_mla_attention -> utils.cp -> ring_flash_attn
+#   orjson      -- orchestrator -> advantage -> vf_utils
+#
+# The orchestrator one is the expensive kind: the run reports "Startup
+# complete", brings up inference and the trainer on both GPUs, and only then
+# dies -- about three minutes of GPU time to learn that an import is missing.
 from importlib.metadata import entry_points
+
 envs = [e.name for e in entry_points(group="verifiers.environments")]
 assert "oolong" in envs, f"oolong not registered as a verifiers environment: {envs}"
-import prime_rl, rlm_train  # noqa: F401
+
+import importlib
+chains = [
+    "prime_rl.trainer.model",            # pulls flash_attn transitively
+    "prime_rl.orchestrator.orchestrator",  # pulls orjson transitively
+    "prime_rl.entrypoints.rl",
+    "rlm_train",
+    "oolong",
+]
+failed = []
+for mod in chains:
+    try:
+        importlib.import_module(mod)
+    except Exception as exc:
+        failed.append(f"{mod}: {type(exc).__name__}: {exc}")
+if failed:
+    raise SystemExit("  entrypoint imports FAILED:
+    " + "
+    ".join(failed))
+
 print(f"  verifiers environments: {envs}")
-print("  prime_rl + rlm_train import OK")
+print(f"  entrypoint chains import OK ({len(chains)} checked)")
 CHECK
 cd - > /dev/null
 
