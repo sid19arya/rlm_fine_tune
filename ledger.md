@@ -747,3 +747,59 @@ training dies on its own, writing nothing. Consistent with a native-level crash
 Stopped rather than escalate to py-spy/gdb against a process that dies in under
 two minutes writing zero bytes. Pod stopped (not terminated): `$1.13` on this
 pod, **~$2.36 total** of a $5 cap.
+
+---
+
+## Session 3 — the deaths were not undiagnosable; the launcher destroyed the evidence
+
+### 05:38Z — RunPod keeps nothing after a stop
+
+Queried container logs for `pqh54v1mcyare2` via REST, hoping the runtime had
+captured what `train4.log` did not. All three sources empty:
+
+```
+state=EXITED  uptime=4988s  rate=$0.98/hr
+logs source=None    -> (empty)
+logs source=stderr  -> (empty)
+logs source=system  -> (empty)
+```
+
+Status survives a stop; **logs do not**. Post-mortem has to happen while the pod
+is up, or be written to the volume. Recorded as unrecoverable.
+
+### 05:40Z — the real finding
+
+"Consistent with a native crash" was an inference, and I stopped at it. Three
+standard diagnostics for a process that dies without output were never run, and
+the launcher I used made two of them impossible:
+
+```
+setsid nohup uv run rl --config smoke.toml > train.log 2>&1 &
+```
+
+| Defect | Consequence |
+|---|---|
+| `setsid ... &`, never reaped | exit status discarded 4x. 139/134/137 would have named the cause outright |
+| stdout block-buffered to a file | up to 8KB of startup output lost at signal death |
+| no `PYTHONFAULTHANDLER` | native crash produces no stack, so logs look clean |
+
+**`train4.log` being 0 bytes does not mean the process wrote nothing.** Python
+block-buffers stdout in 8KB chunks when it is a file, and a signal death never
+flushes. It means it died before filling one buffer. I read a property of my
+own redirection as a property of the trainer, and built the "writes nothing"
+conclusion on top of it.
+
+Note the launcher was never a committed artifact -- it was typed into an SSH
+session four times. Nothing that decides how a run dies should live only in
+shell history.
+
+### Fixed: `experiments/v0_smoke/launch.sh`
+
+Records the exit code to a file, sets `PYTHONFAULTHANDLER=1` and
+`PYTHONUNBUFFERED=1`, sets `CUDA_LAUNCH_BLOCKING=1` for diagnostic runs, names
+the signal (134 SIGABRT / 137 SIGKILL / 139 SIGSEGV), and dumps `dmesg` after
+death. Deliberately `set -uo pipefail` without `-e`: the point is to observe a
+failing command, not to abort on it.
+
+Cost to re-run with this in place: **~15 minutes, ~$0.25** of the $2.64
+remaining under the $5 cap.
