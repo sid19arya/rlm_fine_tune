@@ -1052,3 +1052,56 @@ Raised the timeout to 900s on the pod and relaunched (run 7).
   respawn from hang without any privileges.
 * `pkill -9 -f vllm` matched my own ssh command string and killed the session.
   Kill by PID from `nvidia-smi --query-compute-apps` instead.
+
+### 18:03Z — THE DELIVERABLE: 420.66 seconds per step
+
+```
+SUCCESS Step 0 | Time: 420.66s | Reward: 0.1250
+               | Seq. Length: 6857.1 tokens/sample | Max. Off-Policy Level: 0
+```
+
+Step 0 ran 17:56:06 -> 18:03:15. **420.66s/step on 2x RTX A6000 @ $1.06/hr.**
+
+| | wall time | cost |
+|---|---|---|
+| 20-step smoke | 2.3h | ~$2.48 |
+| **250-step real run** | **29.2h** | **~$31** |
+
+**The real run is affordable.** That is the question V0 existed to answer.
+
+### What the heartbeat fix changed
+
+| | run 6 (30s timeout) | run 7 (900s) |
+|---|---|---|
+| Active tasks | 0, always | 8 concurrent |
+| GPU 0 utilisation | 0% | 99-100% sustained |
+| Worker kills | every ~66s, unbounded | 0 after relaunch |
+| Steps completed | 0 | 1, in 420s |
+
+### Two caveats that matter more than the headline
+
+1. **`Detected 4/8 rollouts (zero_advantage=4), enforced 4`.** Half the batch
+   produced no learning signal. With 2 more lost to `WorkerStartupError`, the
+   effective batch was ~2 of 8. The wall-clock estimate holds; the sample
+   efficiency does not. Fix before committing 29 hours.
+2. **`Seq. Length: 6857.1 tokens/sample`** against a configured `min_ctx=32768,
+   max_ctx=65536`. Rollouts are terminating far earlier than the context
+   budget implies. Understand this before the real run -- it may mean the
+   long-context regime the experiment is *about* is not actually being
+   exercised.
+
+### Second 30s timeout, in rlm this time
+
+```
+rlm_train.repl.subprocess.WorkerStartupError:
+Worker did not produce init line in 30.0s; stderr=''
+```
+
+Independent of the verifiers heartbeat: rlm's REPL subprocess gets 30s to emit
+its init line, which is not enough when 8 rollouts spawn interpreters against a
+box whose GPU is saturated. Cost 2 of 8 rollouts on step 0. Same shape as the
+other one -- a fixed 30s budget that is fine on an idle machine and wrong under
+load. Fix in the fork.
+
+Also seen: `final_env_response returned raw dicts/strings instead of
+vf.Messages`, the same wrong-type bug as `prompt_messages`.
