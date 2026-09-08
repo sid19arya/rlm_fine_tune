@@ -44,9 +44,17 @@ export PYTHONFAULTHANDLER=1
 # Unbuffered stdout/stderr: output survives a signal death. Costs a little
 # throughput on a chatty trainer and is worth it every time.
 export PYTHONUNBUFFERED=1
-# Make CUDA errors point at the launching call rather than a later, unrelated
-# synchronisation point. Slow -- diagnostic runs only.
-export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-1}
+# CUDA_LAUNCH_BLOCKING makes CUDA errors point at the launching call rather
+# than a later, unrelated synchronisation point -- but it is OFF by default
+# here, deliberately. It serialises every kernel launch, which changes timing:
+# a race-condition crash can simply stop reproducing under it, turning a
+# diagnosable bug into a Heisenbug and costing a pod-hour to learn nothing.
+# It also slows startup, which is billed.
+#
+# Order of operations: run once with faulthandler + unbuffered only (below --
+# near-zero perturbation), and set CUDA_LAUNCH_BLOCKING=1 for a SECOND pass
+# only if the first stack lands inside CUDA/NCCL.
+export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-0}
 # Cores if the kernel will give them to us; harmless where it will not.
 ulimit -c unlimited 2>/dev/null || true
 
