@@ -1105,3 +1105,67 @@ load. Fix in the fork.
 
 Also seen: `final_env_response returned raw dicts/strings instead of
 vf.Messages`, the same wrong-type bug as `prompt_messages`.
+
+---
+
+## Run 8 — activation checkpointing, and the first real step times
+
+Relaunched 18:18:35 with `[trainer.model.ac] mode="full"`. Both GPUs busy
+(100%/98%) through the step-0 -> step-1 boundary, which is exactly where run 7
+died. **No OOM.**
+
+| step | time | reward | seq len | note |
+|---|---|---|---|---|
+| 0 | 709.41s | 0.2500 | 6721.2 | warmup: cold vLLM, first REPL spawns |
+| 1 | 277.19s | 0.1250 | 6513.9 | |
+| 2 | 204.05s | 0.3750 | 6053.0 | |
+| 3 | 287.16s | 0.6250 | 4043.8 | |
+
+**Steady state (1-3): median 277s, mean 256s.** Step 0 is not representative
+and the earlier "420.66s/step" headline from run 7 was a single
+warmup-contaminated observation.
+
+Revised: **250 steps ~= 17.8h ~= $19** on 2x RTX A6000 @ $1.06/hr. My earlier
+29h/$31 was anchored on that one bad number.
+
+### Do not read the reward yet
+
+0.25 -> 0.125 -> 0.375 -> 0.625 looks like learning. With 8 rollouts the noise
+band is +/-0.17 and the largest single move is 0.25, barely over one band. Four
+points is not a trend. This is precisely the misreading HERMES.md section 3
+exists to prevent.
+
+### Do watch the sequence length
+
+6721 -> 6513 -> 6053 -> 4044, monotonic, -40% over four steps. If rollouts are
+terminating earlier each step, the long-context regime the experiment is about
+is quietly shrinking, and it would interact with the persistent
+`zero_advantage=4/8`. Worth understanding before a 250-step commitment.
+
+### The monitor was blind, and only live data showed it
+
+Running `rlmwatch digest` against this run reported **"at step None: nothing has
+moved yet"** with two steps complete. prime-rl logs in wandb **shared mode**,
+which never populates `_step` in the run summary -- and the summary was the
+only place the digest looked. Had Hermes been started, it would have reported a
+healthy run as dead indefinitely.
+
+Three wrong step rates were measured live before the estimator was right:
+
+| reading | cause |
+|---|---|
+| 2032s/step | `elapsed / step_count`, charging provisioning to every step |
+| 17s/step | read `_step` (log-call counter, 244) as the training step (2) |
+| 2s/step | raw consecutive deltas across duplicate rows from two writers |
+
+The 17s reading is the dangerous one: wrong by 16x **and optimistic**, the
+direction that gets a long run approved on a false budget.
+
+Fixed by deduping to one timestamp per step and taking the median of per-step
+deltas (`467f6dc`). 5 tests added, each pinned to an observed failure.
+
+### Log-reading note for anyone following
+
+prime-rl colourises its logs, so ANSI escapes sit BETWEEN `SUCCESS` and `Step`.
+`grep "SUCCESS Step"` matches nothing and reads as "no steps have run".
+Use `grep "| Time:"`.
