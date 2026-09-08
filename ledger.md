@@ -521,3 +521,83 @@ error: Your local changes to the following files would be overwritten by checkou
 
 — my own earlier HTTPS rewrite blocking the checkout. `set -e` stopped it
 before `rm -rf .venv`, so the working environment was never damaged.
+
+### 00:52Z — the pin does not fix it either. Two failure modes, one root cause.
+
+Pinning to `1fd2d732c` was based on that commit's config matching `smoke.toml`.
+Checking the *env block* specifically, before launching, showed it does not:
+
+```toml
+# 1fd2d732c
+[[orchestrator.train.env]]
+name = "alphabet-sort"
+env.taskset = { id = "alphabet-sort-v1", ... }
+env.agent.harness = { id = "null" }
+
+# what rlm's config needs
+[[orchestrator.train.env]]
+id = "oolong"
+[orchestrator.train.env.args]
+dataset_name = "spam"
+```
+
+The `taskset`/`agent` structure **predates** the rename I had identified. Last
+prime-rl configs using `env.args`: **2026-07-20**. `group_size` vs
+`rollouts_per_example` confirms the same drift independently.
+
+Running it anyway gave a second, different failure:
+
+```
+AttributeError: module 'verifiers.v1' has no attribute 'EnvServerConfig'
+```
+
+Pinned prime-rl needs its **vendored** verifiers (`deps/verifiers` @ `d0bb0ff`);
+`rlm-train` declares `verifiers>=0.1.11`, which resolves from PyPI and has an
+incompatible API. They cannot coexist in one environment. (An earlier
+`connect-python` clash was cleared using the remedy its own error named — that
+one was genuinely fixable.)
+
+**Root cause, stated plainly:** `alexzhang13/rlm`'s training harness targets a
+prime-rl from ~mid-July 2026 and pins no version — not in `pyproject.toml`, not
+in a lockfile, not in the README. prime-rl has since made at least two breaking
+changes. Anyone following rlm's training README today gets a config that cannot
+validate against any prime-rl they would plausibly install.
+
+### 00:56:30Z — stopped, not terminated
+
+```
+before: RUNNING, uptime 66 min, spend $1.08
+stop sent
+after : EXITED
+```
+
+`stop` rather than `terminate`: compute billing halts, the volume disk survives
+at ~$0.01/hr, and the 15.3 GiB model plus both checkouts are still there if a
+correct prime-rl commit turns up. Terminate destroys all of it and there is no
+network volume. This was the reversible option and the agent took it without
+waiting, because the alternative was idling at $0.98/hr for an unbounded period.
+
+**Total spend: ~$1.23** (pod 1 $0.15 + pod 2 $1.08) of a $5 cap.
+
+---
+
+## V0 outcome
+
+**The deliverable was not obtained.** No seconds-per-step, because not one
+training step ran.
+
+**What was proven to work:** provisioning, SSH with an injected key, env
+propagation into non-interactive shells, 2x A40 45.5GB each, Qwen3-8B 15.3 GiB
+verified on the volume disk, prime-rl building from source including
+flash-attn-4, `rlmwatch` installed and running on the pod, and the ablation arm
+verified green against live code — including the `_restore_scaffold` turn-two
+trap that a source-scanning approach could never have caught.
+
+**What blocked it:** rlm and prime-rl have diverged and rlm pins no version.
+
+**What the run found in rlmwatch itself:** the budget cap was inert, because
+RunPod populates neither `uptimeSeconds` nor `runtime` on a live pod and spend
+therefore computed as $0.00 forever. That is the exact failure class the library
+exists to catch, and only a live pod surfaced it.
+
+**11 interventions logged**, 2 unrecoverable — both the same root cause.
