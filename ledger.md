@@ -601,3 +601,55 @@ therefore computed as $0.00 forever. That is the exact failure class the library
 exists to catch, and only a live pod surfaced it.
 
 **11 interventions logged**, 2 unrecoverable — both the same root cause.
+
+### 01:05Z — the compatible prime-rl commit, found by dating the harness
+
+The right method is not to ask upstream, it is to date the harness and diff
+schemas. `rlm/training/configs/` has **one commit in its entire history**:
+
+```
+de762b9  2026-05-24  add training harness and update the local REPL slightly
+```
+
+So the harness targets prime-rl from late May 2026 — not mid-July, as estimated
+earlier from a rename commit message. That estimate was wrong by seven weeks,
+and the two failed pins followed from it. Dating the config should have come
+first.
+
+**Candidate: `083127fe` (2026-05-27), three days after the harness landed.**
+Every key prime-rl HEAD rejected exists there, read from the schema rather than
+inferred:
+
+| key | evidence at `083127fe` |
+|---|---|
+| `[[orchestrator.train.env]]` `id`/`args` | `EnvConfig`: `id: str`, `name`, `args: dict` |
+| `rollouts_per_example` | `AliasChoices("group_size", "rollouts_per_example")` |
+| `[[orchestrator.filters]]` | `RepetitionFilterConfig`, `ZeroAdvantageFilterConfig` |
+| `[inference] gpu_memory_utilization` | `gpu_memory_utilization: float = 0.9` |
+| `[inference.parallel]` | `ParallelConfig` (tp/dp) |
+
+`rollouts_per_example` surviving only as an *alias* is the convincing detail:
+rlm's author wrote against a prime-rl where it still resolved.
+
+**Two risks git cannot settle.** May-2026 prime-rl pins older torch/vLLM, and
+whether that stack builds on an A40 today is unknown until tried. And its
+vendored `verifiers` may still clash with `rlm-train`'s `verifiers>=0.1.11` —
+that conflict is orthogonal to the config schema and could still bite.
+
+### Correction: "verifiers without prime-rl" was vaguer than it should have been
+
+Stated earlier as an alternative without qualification. Precisely:
+
+- **verifiers** is the environment/rollout framework; `oolong` registers into it
+  via the `verifiers.environments` entry point.
+- **prime-rl** is the training loop — trainer, weight sync, GRPO.
+
+verifiers alone can load the env, run rollouts against a vLLM server, execute
+the REPL and score with the rubric. It **cannot train**: no optimizer, no weight
+updates, no policy gradient.
+
+So it does **not** produce V0's deliverable. Seconds-per-step measures a
+training step and there would be none. What it produces is base-model
+performance through the REPL harness — useful later as cells A0/A of V1's eval
+protocol, but not V0, and it should not have been offered as an alternative
+without saying so.
