@@ -37,6 +37,19 @@ DMESG_FILE="$RUN_DIR/dmesg.txt"
 # shellcheck disable=SC1091
 [ -f /etc/rp_pod_env ] && { set -a; source /etc/rp_pod_env; set +a; }
 
+# uv installs to ~/.local/bin, which is added to PATH by ~/.profile -- a file a
+# detached non-interactive shell never reads. The first instrumented launch
+# died at exit 127 with "stdbuf: failed to run command 'uv'" for exactly this
+# reason. /etc/rp_pod_env carries only WANDB_/HF_ vars, not PATH, so it does
+# not help here.
+export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+if ! command -v uv > /dev/null; then
+  echo "FATAL: uv is not on PATH ($PATH)" >&2
+  echo "127" > "$EXIT_FILE"
+  exit 127
+fi
+echo "uv      : $(command -v uv) $(uv --version 2>/dev/null)"
+
 # --- instrumentation -------------------------------------------------------
 # Dump a C-level stack on SIGSEGV/SIGBUS/SIGFPE/SIGABRT. This is the one that
 # turns "native crash, cause unknown" into a named frame.
