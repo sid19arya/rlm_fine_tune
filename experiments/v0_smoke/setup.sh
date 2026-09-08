@@ -167,9 +167,23 @@ echo "  deps ok: $(ls -d deps/*/ | tr '
 ' ' ')"
 
 log "building prime-rl (torch, vLLM, ~300 packages -- the slow step)"
-uv sync || die "uv sync failed"
+# --extra flash-attn is REQUIRED, not an optimisation. flash_attn is a
+# transitive import of the trainer itself, not just of the attention backend
+# this config selects:
+#   rl.py -> trainer.model -> trainer.lora -> models/__init__ -> glm_moe_dsa
+#        -> sparse_mla_attention -> utils.cp -> ring_flash_attn -> flash_attn
+# so a plain `uv sync` builds an environment that cannot import the trainer at
+# all, and fails with ModuleNotFoundError long after the config validates.
+#
+# It is cheap: the extra resolves to a PREBUILT wheel
+# (flash_attn-2.8.3+cu128torch2.11-cp312-cp312-linux_x86_64.whl), not a source
+# build, so this is a download rather than a 40-minute nvcc compile.
+uv sync --extra flash-attn || die "uv sync failed"
 
 log "wiring rlm into the prime-rl environment"
+# Order matters: this runs AFTER uv sync. `uv sync` reconciles the environment
+# against the lockfile and can evict packages installed with `uv pip install`,
+# so wiring first and syncing second silently un-wires oolong.
 uv pip install -e /workspace/rlm/training
 uv pip install -e /workspace/rlm/training/environments/oolong
 uv run python - <<'CHECK'
