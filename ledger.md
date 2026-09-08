@@ -408,3 +408,53 @@ other packages. It fitted this time with 16G to spare, but only just.
 `setup.sh` now pins `UV_CACHE_DIR=/workspace/uv-cache` and sets
 `UV_LINK_MODE=hardlink`, which also removes the "Failed to hardlink files,
 falling back to full copy" warning and the doubled disk write behind it.
+
+### 00:36Z — the verifiers conflict resolved itself
+
+Installing rlm's packages into prime-rl's venv replaced three of its vendored
+submodule packages with PyPI versions:
+
+```
+- verifiers==0.0.1.dev1 (from deps/verifiers)  ->  + verifiers==0.3.1
+- renderers==0.0.1.dev1 (from deps/renderers)  ->  + renderers==0.1.11
+- mcp==2.0.0                                    ->  + mcp==1.29.1
+```
+
+prime-rl pins those as local submodules deliberately; `rlm/training` declares
+`verifiers>=0.1.11`, which resolves from PyPI and clobbers the vendored fork.
+This was the first thing in the run with a real chance of being unfixable in
+minutes. It was not:
+
+```
+verifiers environments: ['oolong']
+prime_rl, rlm_train, oolong all import
+```
+
+prime-rl tolerates upstream verifiers 0.3.1, and `oolong` registers as a
+`verifiers.environments` entry point, which is how `rl` discovers it. `uv pip
+install --inexact` was used throughout, since prime-rl's README warns a plain
+`uv sync`/`uv run` will uninstall anything outside its lockfile — which would
+have silently removed the packages being added.
+
+### 00:38Z — GATE: ablation arm verified on the live pod
+
+```
+$ verify_ablation.py --rlm-root /workspace/rlm --config .../smoke.toml
+verifying the NO recursion (ablation) arm against /workspace/rlm
+
+  [ok] prompt names no sub-LM function
+  [ok] prompt describes no delegation
+  [ok] REPL binds no sub-LM tool
+  [ok] _restore_scaffold does not re-bind the tools
+  [ok] prompt and REPL agree on every tool name
+  [ok] rubric does not gate on sub-calls
+
+The NO recursion (ablation) arm is correctly selected.   exit 0
+```
+
+Verified against the actually-installed code rather than a local simulation.
+The `_restore_scaffold` line is the one that matters most: it re-installs the
+REPL scaffolding after every turn, so a flag honoured only at setup would have
+restored delegation on turn two, mid-rollout, invisibly.
+
+`rl --help` responds, so prime-rl's entry point is live.
