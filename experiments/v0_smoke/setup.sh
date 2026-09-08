@@ -142,6 +142,12 @@ cp /workspace/rlm_fine_tune/experiments/v0_smoke/smoke.toml \
    /workspace/rlm/training/configs/smoke.toml
 echo "  training/configs/smoke.toml written"
 
+log "installing tmux (not in the base image; the old instructions assumed it)"
+# The previous next-steps block told the operator to run under tmux on an image
+# that has no tmux, so the recommended command failed outright. launch.sh no
+# longer needs it, but an interactive shell for poking at a live run does.
+apt-get install -y -qq tmux < /dev/null > /dev/null 2>&1   && echo "  tmux $(tmux -V 2>/dev/null)" || echo "  tmux unavailable (non-fatal)"
+
 log "pre-downloading Qwen3-8B"
 # Not during step 1. A 16GB pull racing the first training step produces a
 # timeout that looks exactly like a hang.
@@ -175,10 +181,15 @@ Next:
      (smoke.toml sets enable_sub_lm = false; this checks the REPL and the
       prompt agree, and that nothing re-binds the tools mid-rollout)
   2. rlmwatch preflight -c configs/rlm-ft-v0-smoke.yaml
-  3. tmux new -s rlm          <-- NEVER a bare SSH shell. A dropped
-                                  connection kills an unwrapped run, and the
-                                  pod keeps billing afterwards.
-  5. uv run rl @ training/configs/smoke.toml
+  3. bash /root/launch.sh     <-- use this, NOT a bare `uv run rl`.
+                                  It detaches (so an SSH drop cannot kill the
+                                  run), records the trainer's exit code, and
+                                  turns on faulthandler + unbuffered output.
+                                  Launching by hand is how four startup deaths
+                                  were made undiagnosable.
+
+  Artifacts land in /workspace/runs/<timestamp>/:
+    train.log  exit_code  dmesg.txt
 
 Then the four checks, in order, stopping at the first failure:
   python checks.py --at 2 ; --at 5 ; --at 15 ; --at 30
