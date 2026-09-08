@@ -19,12 +19,45 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+
+
+def _age_seconds(stamp: object, *, now: datetime | None = None) -> float:
+    """Seconds since a RunPod timestamp, or 0.0 if it cannot be parsed.
+
+    RunPod returns e.g. ``2026-09-07 23:50:20.758 +0000 UTC`` -- a Go-style
+    string that is not ISO 8601, so ``fromisoformat`` rejects it outright. The
+    trailing zone name is dropped and the offset kept.
+
+    Returning 0.0 on a parse failure is deliberate but dangerous, and callers
+    should treat a 0 uptime on a pod that is plainly running as "unknown"
+    rather than "free".
+    """
+    if not isinstance(stamp, str) or not stamp.strip():
+        return 0.0
+    text = stamp.strip()
+    for suffix in (" UTC", "Z"):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].strip()
+    # "+0000" -> "+00:00" so fromisoformat accepts the offset.
+    match = re.search(r"([+-])(\d{2}):?(\d{2})$", text)
+    if match:
+        text = text[: match.start()].strip() + f"{match.group(1)}{match.group(2)}:{match.group(3)}"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    reference = now or datetime.now(timezone.utc)
+    return max(0.0, (reference - parsed).total_seconds())
 
 DEFAULT_BASE_URL = "https://rest.runpod.io"
 
@@ -154,7 +187,19 @@ class RunPodClient:
         machine = data.get("machine") or {}
         uptime = data.get("uptimeSeconds")
         if uptime is None:
-            uptime = data.get("runtime", {}).get("uptimeInSeconds", 0) or 0
+            uptime = (data.get("runtime") or {}).get("uptimeInSeconds") or None
+        if not uptime:
+            # Neither field is populated on a live pod -- observed on a running
+            # 2x A40: `uptimeSeconds` absent and `runtime` null. Falling back to
+            # 0 would be catastrophic rather than merely wrong: every cost probe
+            # computes spend as uptime x rate, so a permanent 0 means spend is
+            # always $0.00 and the budget cap can never fire. The one safety
+            # mechanism that has to work without a human present would be
+            # silently inert.
+            #
+            # `createdAt` is the correct clock anyway: billing starts when the
+            # pod is provisioned, not when it finishes booting.
+            uptime = _age_seconds(data.get("createdAt") or data.get("lastStartedAt"))
         gpu_type = (
             data.get("machineType") or machine.get("gpuTypeId") or data.get("gpuTypeId") or ""
         )

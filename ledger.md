@@ -282,3 +282,64 @@ Worth recording as a class: three of the six setup failures were introduced by
 the tooling around the script rather than by the pod. A Windows control machine
 driving a Linux pod has this hazard everywhere, and the cheap defence is to
 normalise at the boundary rather than trust the working copy.
+
+### 00:17Z — setup complete, and the model landed fast
+
+`SETUP_EXIT=0`. The download the spec budgeted ~25 minutes for took **13
+seconds**:
+
+```
+Fetching 15 files: 100%|██████████| 15/15 [00:13<00:00,  1.19s/it]
+model at /workspace/hf/hub/models--Qwen--Qwen3-8B/snapshots/b968826d... (15.3 GiB)
+```
+
+~1.2 GB/s on RunPod EU to the HF CDN. Not taken at face value — the snapshot
+directory holds 76-byte symlinks into `blobs/`, so sizes were re-read
+dereferenced:
+
+```
+model-00001-of-00005.safetensors  3.72 GiB
+model-00002-of-00005.safetensors  3.72 GiB
+model-00003-of-00005.safetensors  3.69 GiB
+model-00004-of-00005.safetensors  2.97 GiB
+model-00005-of-00005.safetensors  1.16 GiB
+arch: ['Qwen3ForCausalLM'] | layers: 36 | hidden: 4096
+```
+
+On `/workspace`, not the 30GB container disk. For V1 planning: the download is
+not a meaningful cost in this datacenter, and `startup.deadline_s: 3600` is very
+conservative.
+
+### 00:17Z — the budget cap was inert (most serious defect so far)
+
+Checking spend returned `$0.00` on a pod that had been running half an hour.
+
+```
+PodStatus.uptime_s = 0.0  -> spend would be $0.00
+```
+
+The live API populates **neither** `uptimeSeconds` nor `runtime` on a running
+pod. Every cost probe computes spend as `uptime x rate`, so a permanent zero
+means:
+
+- `cost.spend` never warns and never fails,
+- `budget.max_usd` — the $5 cap — can never be reached,
+- `cost.cost_per_progress` reports nothing,
+- and the digest tells Hermes the run is free.
+
+The single safeguard that has to work without a human present would have been
+silently switched off for the whole run, while reporting healthy.
+
+`createdAt` is present and is the correct clock anyway, since billing starts at
+provisioning rather than at boot. The client now falls back to it. RunPod
+returns a Go-style stamp (`2026-09-07 23:50:20.758 +0000 UTC`) which is not ISO
+8601 and which `fromisoformat` rejects, so it is parsed explicitly.
+
+Verified against the live pod:
+
+```
+uptime 30.2 min -> spend $0.49 of $5.00
+```
+
+Six tests cover it, including that unparseable input yields 0.0 rather than an
+exception.

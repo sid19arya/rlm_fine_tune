@@ -40,6 +40,7 @@ class FakePod:
         self.uptime_s = uptime_s
         self.cost_per_hr = cost_per_hr
         self.terminated = False
+        self.created_at: str | None = None
         self.logs: list[dict[str, str]] = []
 
     def emit(self, line: str, *, source: str = "stdout", ts: str | None = None) -> None:
@@ -55,6 +56,8 @@ class FakePod:
             "gpuCount": self.gpu_count,
             "uptimeSeconds": self.uptime_s,
             "costPerHr": self.cost_per_hr,
+            # The live API omits uptimeSeconds entirely on a running pod.
+            **({"createdAt": self.created_at} if self.created_at else {}),
         }
 
 

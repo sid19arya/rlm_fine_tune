@@ -192,3 +192,54 @@ class TestWandbClient:
     def test_confirm_passes_when_the_condition_persists(self):
         api, client = self.make(summary={"_timestamp": 1_000_000.0})
         assert client.confirm("e/p/r", lambda: True, delay_s=0, sleep=lambda _: None) is True
+
+
+class TestUptimeFallback:
+    """Observed live: a running pod reports neither uptimeSeconds nor runtime.
+
+    Falling back to 0 is not merely inaccurate -- every cost probe computes
+    spend as uptime x rate, so a permanent 0 means the budget cap can never
+    fire. The one safeguard that must work unattended would be silently inert.
+    """
+
+    def test_created_at_is_used_when_uptime_is_absent(self):
+        from datetime import datetime, timedelta, timezone
+
+        from rlmwatch.clients.runpod import _age_seconds
+
+        created = datetime.now(timezone.utc) - timedelta(hours=2)
+        stamp = created.strftime("%Y-%m-%d %H:%M:%S.%f +0000 UTC")
+        assert _age_seconds(stamp) == pytest.approx(7200, abs=5)
+
+    def test_it_parses_runpods_go_style_timestamp(self):
+        from datetime import datetime, timezone
+
+        from rlmwatch.clients.runpod import _age_seconds
+
+        now = datetime(2026, 9, 8, 0, 20, 20, tzinfo=timezone.utc)
+        assert _age_seconds("2026-09-07 23:50:20.758 +0000 UTC", now=now) == pytest.approx(
+            1800, abs=2
+        )
+
+    def test_iso_timestamps_still_work(self):
+        from datetime import datetime, timezone
+
+        from rlmwatch.clients.runpod import _age_seconds
+
+        now = datetime(2026, 9, 8, 0, 20, 20, tzinfo=timezone.utc)
+        assert _age_seconds("2026-09-07T23:50:20+00:00", now=now) == 1800.0
+
+    def test_unparseable_input_is_zero_not_an_exception(self):
+        from rlmwatch.clients.runpod import _age_seconds
+
+        assert _age_seconds("not a date") == 0.0
+        assert _age_seconds(None) == 0.0
+
+    def test_status_derives_uptime_from_created_at(self, server, runpod):
+        from datetime import datetime, timedelta, timezone
+
+        pod = server.pods["pod-1"]
+        pod.uptime_s = 0  # as the live API actually returns it
+        created = datetime.now(timezone.utc) - timedelta(minutes=45)
+        pod.created_at = created.strftime("%Y-%m-%d %H:%M:%S.%f +0000 UTC")
+        assert runpod.status("pod-1").uptime_s == pytest.approx(2700, abs=10)
