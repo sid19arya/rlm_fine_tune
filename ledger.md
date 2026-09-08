@@ -936,3 +936,59 @@ $1.50 to **$2.10** cumulative on this pod -- sized to let a full 20-step run
 FINISH rather than to end it early, keeping the $5 account cap with ~$0.55
 margin. Stopping a working run at step 3 to save $1 would have been the wrong
 trade, and the first cap was set without doing that arithmetic.
+
+### 16:25-16:31Z — run 5 reached training and died on the volume quota
+
+Furthest yet. The ablation arm confirmed live in the real process:
+
+```
+oolong-spam-train args={'dataset_name':'spam','enable_sub_lm':False,'min_subcall':0,
+                        'min_ctx':32768,'max_ctx':65536,'max_iterations':12}
+sampling: temperature=1.0, max_completion_tokens=2048, enable_thinking=False
+vLLM: Qwen3-8B, max_model_len 16384, enable_lora, max_lora_rank 32, gpu_util 0.8
+W&B run: 4d3d911c450c433ba8dc7d4157b4c321   (shared mode again; NOT v0-smoke-diag)
+```
+
+Then, in `trainer.log` (not train.log -- the top-level log showed only
+"Orchestrator failed", the cause was one level down):
+
+```
+safetensors_rust.SafetensorError: Error while serializing:
+I/O error: Disk quota exceeded (os error 122)
+```
+
+### The 100GB volume was never big enough
+
+`du` said 70.7GB of 100GB -- 29GB apparently free. An empirical write probe
+said otherwise:
+
+```
+5GB  write: OK
+10GB write: FAILED
+```
+
+**The volume charges quota at roughly 1.33x raw bytes.** 70.7GB real is ~94GB
+charged, leaving ~6GB -- which is exactly what the probe found. A 100GB volume
+yields ~75GB usable.
+
+Measured requirement:
+
+| item | GB |
+|---|---|
+| uv environment (torch, vLLM, ~300 pkgs) | 33 |
+| Qwen3-8B in HF cache | 20 |
+| oolong-synth dataset | 11 |
+| weight broadcast, 8B bf16 via filesystem | ~16 |
+| **total** | **~80-90** |
+
+So the smoke test needs ~85-90GB against ~75GB available. It could not have
+fitted. Last session's identical "Disk quota exceeded" was blamed on
+`UV_CACHE_DIR`; the cache made it worse but was never the whole story.
+
+`provision.py` now specifies **200GB**, with the measured budget recorded.
+
+**Never trust statvfs on this volume.** `df` reports the MooseFS cluster (191T
+free) rather than the quota. The only reliable check is to write a probe file.
+
+Pod `gfbjns3cqfa9cv` terminated (204, 0 pods). Spend this pod ~$0.87;
+running total ~$3.23 of $5.

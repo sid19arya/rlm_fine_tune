@@ -61,7 +61,23 @@ POD_SPEC = {
     "cloudType": "SECURE",
     "gpuCount": 2,
     "containerDiskInGb": 30,
-    "volumeInGb": 100,
+    # 200GB, not 100. Measured on a 100GB volume: the workload needs ~85-90GB
+    # of real bytes and the volume charges quota at roughly 1.33x raw size, so
+    # 100GB yields only ~75GB usable and the run dies mid-training with
+    #   safetensors_rust.SafetensorError: Error while serializing:
+    #   I/O error: Disk quota exceeded (os error 122)
+    #
+    # The budget, measured:
+    #   uv environment (torch, vLLM, ~300 pkgs)   33GB
+    #   Qwen3-8B in the HF cache                  20GB
+    #   oolong-synth dataset                      11GB
+    #   weight broadcast (8B bf16 via filesystem) ~16GB
+    #
+    # Do not trust statvfs here: `df` reports the MooseFS cluster (191T free)
+    # rather than this volume's quota, so it shows enormous headroom on a
+    # volume that is one write from EDQUOT. The only reliable check is to
+    # write a probe file and see whether it lands.
+    "volumeInGb": 200,
     "volumeMountPath": "/workspace",
     "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
     "ports": ["22/tcp", "8000/http"],
